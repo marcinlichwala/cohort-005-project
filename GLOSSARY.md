@@ -85,6 +85,15 @@ A Refund where the money couldn't be sent. The Refund Request stays approved, be
 The seconds of video a Learner has actually played in a course: the furthest point reached in each lesson, added up. Not lessons opened.
 _Avoid_: Viewed, Progress
 
+### Refund rules
+
+**Refund Window**:
+The 14 days after a Purchase in which its buyer can raise a Refund Request.
+_Avoid_: Refund period, Grace period
+
 **Watch Limit**:
-Two hours of Watched time on a course. Once a Learner passes it, they can no longer raise a Refund Request for that course.
+One hour of Watched time on a course. Once a Learner reaches it, they can no longer raise a Refund Request for their Individual Purchase of that course. It doesn't apply to a Team Licence, which a Claimed Seat blocks instead.
 _Avoid_: Watch cap, Viewing threshold
+
+**Completion Limit**:
+Half of a course's lessons completed. Once a Learner reaches it, they can no longer raise a Refund Request for their Individual Purchase of that course.
