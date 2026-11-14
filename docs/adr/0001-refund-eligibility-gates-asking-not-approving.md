@@ -1,0 +1,3 @@
+# Refund eligibility gates asking, not approving
+
+The eligibility rules (within 14 days of purchase, under 2 hours watched, no claimed team seat) are checked only when a learner raises a Refund Request, not again when an admin approves it. By the time an admin reviews a request the learner may have crossed the 14-day line or kept watching, and re-checking would make the decision depend on how quickly the team got to it, and would stop admins from making deliberate exceptions. So the rules decide whether a learner may *ask*; once asked, the decision is the admin's alone, and the approval screen shows days since purchase, hours watched, and amount paid so they can make it with the facts in front of them.

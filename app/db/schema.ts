@@ -31,10 +31,16 @@ export enum QuestionType {
   TrueFalse = "true_false",
 }
 
-export enum RefundStatus {
+export enum RefundRequestStatus {
   Open = "open",
   Approved = "approved",
   Declined = "declined",
+}
+
+export enum RefundStatus {
+  Pending = "pending",
+  Issued = "issued",
+  Failed = "failed",
 }
 
 export enum TeamMemberRole {
@@ -229,8 +235,8 @@ export const purchases = sqliteTable(
   (table) => [index("purchases_course_idx").on(table.courseId)]
 );
 
-export const refunds = sqliteTable(
-  "refunds",
+export const refundRequests = sqliteTable(
+  "refund_requests",
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
     purchaseId: integer("purchase_id")
@@ -238,20 +244,45 @@ export const refunds = sqliteTable(
       .references(() => purchases.id),
     status: text("status")
       .notNull()
-      .$type<RefundStatus>()
-      .default(RefundStatus.Open),
+      .$type<RefundRequestStatus>()
+      .default(RefundRequestStatus.Open),
     // The learner's own words, in the box on the course page.
     reason: text("reason").notNull(),
-    // Null until someone approves — a declined request refunds nothing.
-    amountRefunded: integer("amount_refunded"),
     requestedAt: text("requested_at")
       .notNull()
       .$defaultFn(() => new Date().toISOString()),
     resolvedAt: text("resolved_at"),
     resolvedByUserId: integer("resolved_by_user_id").references(() => users.id),
+    // Optional words from the admin to the learner, only on a Declined
+    // Refund Request.
+    declineNote: text("decline_note"),
   },
-  (table) => [index("refunds_purchase_idx").on(table.purchaseId)]
+  (table) => [index("refund_requests_purchase_idx").on(table.purchaseId)]
 );
+
+// One Refund per Approved Refund Request: the money owed back to the learner.
+// A Declined Refund Request has no row here.
+export const refunds = sqliteTable("refunds", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  refundRequestId: integer("refund_request_id")
+    .notNull()
+    .unique()
+    .references(() => refundRequests.id),
+  // Always the full amount paid for the purchase, in cents.
+  amount: integer("amount").notNull(),
+  status: text("status")
+    .notNull()
+    .$type<RefundStatus>()
+    .default(RefundStatus.Pending),
+  createdAt: text("created_at")
+    .notNull()
+    .$defaultFn(() => new Date().toISOString()),
+  // The last status change. On creation this is the approval itself.
+  statusChangedAt: text("status_changed_at"),
+  statusChangedByUserId: integer("status_changed_by_user_id").references(
+    () => users.id
+  ),
+});
 
 export const teams = sqliteTable("teams", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -288,6 +319,9 @@ export const coupons = sqliteTable("coupons", {
     .references(() => purchases.id),
   redeemedByUserId: integer("redeemed_by_user_id").references(() => users.id),
   redeemedAt: text("redeemed_at"),
+  // Set when an Issued Refund on the purchase voids this unclaimed seat. A
+  // voided coupon can't be redeemed.
+  voidedAt: text("voided_at"),
   createdAt: text("created_at")
     .notNull()
     .$defaultFn(() => new Date().toISOString()),

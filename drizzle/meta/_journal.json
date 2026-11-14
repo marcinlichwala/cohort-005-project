@@ -78,6 +78,34 @@
       "when": 1790200000000,
       "tag": "0010_cuddly_red_skull",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1794675196022,
+      "tag": "0011_rename_refunds_to_refund_requests",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1794675731681,
+      "tag": "0012_add_decline_note_to_refund_requests",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1794676050852,
+      "tag": "0013_add_refunds",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1794676504644,
+      "tag": "0014_add_voided_at_to_coupons",
+      "breakpoints": true
     }
   ]
 }

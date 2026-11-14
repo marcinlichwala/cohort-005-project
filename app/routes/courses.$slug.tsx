@@ -16,10 +16,7 @@ import {
   courseRatings,
   purchases,
   coupons,
-  refunds,
-  videoWatchEvents,
   LessonProgressStatus,
-  RefundStatus,
 } from "~/db/schema";
 import { eq, and, or, sql, inArray, isNotNull } from "drizzle-orm";
 import { Card, CardContent, CardHeader } from "~/components/ui/card";
@@ -49,6 +46,8 @@ import { data, isRouteErrorResponse } from "react-router";
 import { formatDuration, formatPrice } from "~/lib/utils";
 import { renderMarkdown } from "~/lib/markdown.server";
 import { resolveCountry } from "~/lib/country.server";
+import { getSecondsWatchedInCourse } from "~/lib/watch-time.server";
+import { findRefundRequestBlockingNewRequest } from "~/lib/refunds.server";
 import {
   calculatePppPrice,
   getCountryTierInfo,
@@ -379,19 +378,6 @@ function getPurchaseForCourse(userId: number, courseId: number) {
     .get();
 }
 
-function getOpenRefundRequest(purchaseId: number) {
-  return db
-    .select({ id: refunds.id })
-    .from(refunds)
-    .where(
-      and(
-        eq(refunds.purchaseId, purchaseId),
-        eq(refunds.status, RefundStatus.Open)
-      )
-    )
-    .get();
-}
-
 function getCompletedLessonCount(userId: number, lessonIds: number[]) {
   if (lessonIds.length === 0) return 0;
 
@@ -408,26 +394,6 @@ function getCompletedLessonCount(userId: number, lessonIds: number[]) {
     .get();
 
   return result?.count ?? 0;
-}
-
-function getSecondsWatched(userId: number, lessonIds: number[]) {
-  if (lessonIds.length === 0) return 0;
-
-  const furthestPerLesson = db
-    .select({
-      furthest: sql<number>`max(${videoWatchEvents.positionSeconds})`,
-    })
-    .from(videoWatchEvents)
-    .where(
-      and(
-        eq(videoWatchEvents.userId, userId),
-        inArray(videoWatchEvents.lessonId, lessonIds)
-      )
-    )
-    .groupBy(videoWatchEvents.lessonId)
-    .all();
-
-  return furthestPerLesson.reduce((total, row) => total + row.furthest, 0);
 }
 
 // Compare whole days, not hours — a purchase at 23:00 should still get its
@@ -447,7 +413,7 @@ function getRefundOffer(userId: number, course: { id: number }) {
   const purchase = getPurchaseForCourse(userId, course.id);
 
   if (!purchase) return null;
-  if (getOpenRefundRequest(purchase.id)) return null;
+  if (findRefundRequestBlockingNewRequest(purchase.id)) return null;
 
   const purchasedDay = asDayString(new Date(purchase.createdAt));
   const windowEnd = new Date(purchase.createdAt);
@@ -468,7 +434,7 @@ function getRefundOffer(userId: number, course: { id: number }) {
     }
   }
 
-  if (getSecondsWatched(userId, lessonIds) >= REFUND_WATCH_LIMIT_SECONDS) {
+  if (getSecondsWatchedInCourse(userId, course.id) >= REFUND_WATCH_LIMIT_SECONDS) {
     return null;
   }
 

@@ -200,3 +200,19 @@ export async function requireInstructorOrAdmin(request: Request) {
 
   return { userId, user, isAdmin: user.role === UserRole.Admin };
 }
+
+/**
+ * Throws unless the user has the platform admin role. Team admins don't
+ * qualify — they administer a team, not the platform.
+ * Call it in the loader and in every action of an admin-only route.
+ */
+export async function requirePlatformAdmin(request: Request) {
+  const userId = await requireUserId(request);
+  const user = getUserById(userId);
+
+  if (!user || user.role !== UserRole.Admin) {
+    throw data("Only platform admins can access this page.", { status: 403 });
+  }
+
+  return { userId, user };
+}

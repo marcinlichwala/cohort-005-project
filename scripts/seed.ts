@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { eq, gte, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
+import { and, eq, gte, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import type { SQLiteTable } from "drizzle-orm/sqlite-core";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
@@ -10,6 +10,7 @@ import {
   UserRole,
   CourseStatus,
   LessonProgressStatus,
+  RefundRequestStatus,
   RefundStatus,
   QuestionType,
   TeamMemberRole,
@@ -77,7 +78,10 @@ async function seed() {
     DROP TABLE IF EXISTS coupons;
     DROP TABLE IF EXISTS team_members;
     DROP TABLE IF EXISTS teams;
+    -- Before migration 0011 this name held the Refund Requests; since 0013
+    -- it holds the Refunds, which point at refund_requests, so it drops first.
     DROP TABLE IF EXISTS refunds;
+    DROP TABLE IF EXISTS refund_requests;
     DROP TABLE IF EXISTS purchases;
     DROP TABLE IF EXISTS enrollments;
     DROP TABLE IF EXISTS lessons;
@@ -2772,16 +2776,199 @@ This course is still in draft while the cluster examples are rewritten against t
       updatedAt: daysAgo(6),
     })
     .run();
-  db.insert(schema.refunds)
+  db.insert(schema.refundRequests)
     .values({
       purchaseId: liamPurchase.id,
-      status: RefundStatus.Open,
+      status: RefundRequestStatus.Open,
       reason: "Bought the wrong one, I meant the advanced course.",
       requestedAt: daysAgo(4),
     })
     .run();
 
   console.log("Created Liam's Refund Request.");
+
+  // ─── Sophia's Declined Refund Request ───
+  // A Declined Refund Request with a Decline Note, so the history section
+  // and the learner's settings page have one to show. She keeps the course.
+
+  const sophia = studentByEmail("sophia.davis@student.dev");
+  const [sophiaPurchase] = db
+    .insert(schema.purchases)
+    .values({
+      userId: sophia.id,
+      courseId: course2.id,
+      amountPaid: 4900,
+      country: null,
+      createdAt: daysAgo(12),
+    })
+    .returning()
+    .all();
+  const sophiaEnrolled = db
+    .select({ id: schema.enrollments.id })
+    .from(schema.enrollments)
+    .where(
+      and(
+        eq(schema.enrollments.userId, sophia.id),
+        eq(schema.enrollments.courseId, course2.id)
+      )
+    )
+    .get();
+  if (!sophiaEnrolled) {
+    db.insert(schema.enrollments)
+      .values({ userId: sophia.id, courseId: course2.id, enrolledAt: daysAgo(12) })
+      .run();
+  }
+  db.insert(schema.refundRequests)
+    .values({
+      purchaseId: sophiaPurchase.id,
+      status: RefundRequestStatus.Declined,
+      reason: "I didn't have time to start it this month.",
+      requestedAt: daysAgo(10),
+      resolvedAt: daysAgo(8),
+      resolvedByUserId: admin.id,
+      declineNote:
+        "The course stays yours with no deadline, so there is no need to refund it. Start whenever suits you.",
+    })
+    .run();
+
+  console.log("Created Sophia's Declined Refund Request.");
+
+  // ─── Noah's Approved Refund Request ───
+  // A learner whose Refund Request Alex approved, so the Refund is Pending:
+  // the money hasn't been confirmed as sent, so Noah keeps his enrollment.
+
+  const [noah] = db
+    .insert(schema.users)
+    .values({
+      name: "Noah Bennett",
+      email: "noah.bennett@student.dev",
+      role: UserRole.Student,
+      avatarUrl: "https://api.dicebear.com/9.x/avataaars/svg?seed=noah",
+      createdAt: daysAgo(20),
+    })
+    .returning()
+    .all();
+  const [noahPurchase] = db
+    .insert(schema.purchases)
+    .values({
+      userId: noah.id,
+      courseId: course1.id,
+      amountPaid: 7900,
+      country: null,
+      createdAt: daysAgo(12),
+    })
+    .returning()
+    .all();
+  db.insert(schema.enrollments)
+    .values({ userId: noah.id, courseId: course1.id, enrolledAt: daysAgo(12) })
+    .run();
+  const [noahRequest] = db
+    .insert(schema.refundRequests)
+    .values({
+      purchaseId: noahPurchase.id,
+      status: RefundRequestStatus.Approved,
+      reason: "The pace is too fast for me — I need a beginner course first.",
+      requestedAt: daysAgo(6),
+      resolvedAt: daysAgo(2),
+      resolvedByUserId: admin.id,
+    })
+    .returning()
+    .all();
+  db.insert(schema.refunds)
+    .values({
+      refundRequestId: noahRequest.id,
+      amount: noahPurchase.amountPaid,
+      status: RefundStatus.Pending,
+      createdAt: daysAgo(2),
+      statusChangedAt: daysAgo(2),
+      statusChangedByUserId: admin.id,
+    })
+    .run();
+
+  console.log("Created Noah's Approved Refund Request and Pending Refund.");
+
+  // ─── Approved Refund Requests with Failed and Issued Refunds ───
+  // Ines's Refund couldn't be sent, so it is Failed: she keeps her
+  // enrollment while the team retries. Lucas's Refund is Issued, which is
+  // final and ended his access, so he has no enrollment.
+
+  function seedApprovedRefund(input: {
+    name: string;
+    email: string;
+    avatarSeed: string;
+    reason: string;
+    refundStatus: RefundStatus;
+    enrolled: boolean;
+  }) {
+    const [learner] = db
+      .insert(schema.users)
+      .values({
+        name: input.name,
+        email: input.email,
+        role: UserRole.Student,
+        avatarUrl: `https://api.dicebear.com/9.x/avataaars/svg?seed=${input.avatarSeed}`,
+        createdAt: daysAgo(25),
+      })
+      .returning()
+      .all();
+    const [purchase] = db
+      .insert(schema.purchases)
+      .values({
+        userId: learner.id,
+        courseId: course1.id,
+        amountPaid: 7900,
+        country: null,
+        createdAt: daysAgo(13),
+      })
+      .returning()
+      .all();
+    if (input.enrolled) {
+      db.insert(schema.enrollments)
+        .values({ userId: learner.id, courseId: course1.id, enrolledAt: daysAgo(13) })
+        .run();
+    }
+    const [request] = db
+      .insert(schema.refundRequests)
+      .values({
+        purchaseId: purchase.id,
+        status: RefundRequestStatus.Approved,
+        reason: input.reason,
+        requestedAt: daysAgo(8),
+        resolvedAt: daysAgo(5),
+        resolvedByUserId: admin.id,
+      })
+      .returning()
+      .all();
+    db.insert(schema.refunds)
+      .values({
+        refundRequestId: request.id,
+        amount: purchase.amountPaid,
+        status: input.refundStatus,
+        createdAt: daysAgo(5),
+        statusChangedAt: daysAgo(1),
+        statusChangedByUserId: admin.id,
+      })
+      .run();
+  }
+
+  seedApprovedRefund({
+    name: "Ines Novak",
+    email: "ines.novak@student.dev",
+    avatarSeed: "ines-novak",
+    reason: "My employer is now paying for a different training programme.",
+    refundStatus: RefundStatus.Failed,
+    enrolled: true,
+  });
+  seedApprovedRefund({
+    name: "Lucas Ferreira",
+    email: "lucas.ferreira@student.dev",
+    avatarSeed: "lucas-ferreira",
+    reason: "I already know most of this material from my previous job.",
+    refundStatus: RefundStatus.Issued,
+    enrolled: false,
+  });
+
+  console.log("Created Ines's Failed Refund and Lucas's Issued Refund.");
 
   // ─── Flush watch events ───
   // Batched: the heartbeat makes these by far the largest table, and one
@@ -2833,6 +3020,9 @@ This course is still in draft while the cluster examples are rewritten against t
   );
   console.log(
     `  Purchases: ${countRows(schema.purchases)} (${countRows(schema.purchases, gte(schema.purchases.createdAt, sevenDaysAgo))} in the last 7 days), spanning ${historyDays} days`
+  );
+  console.log(
+    `  Refund Requests: ${countRows(schema.refundRequests)} (${countRows(schema.refundRequests, eq(schema.refundRequests.status, RefundRequestStatus.Open))} open, ${countRows(schema.refundRequests, eq(schema.refundRequests.status, RefundRequestStatus.Declined))} declined, ${countRows(schema.refundRequests, eq(schema.refundRequests.status, RefundRequestStatus.Approved))} approved), refunds: ${countRows(schema.refunds)} (${countRows(schema.refunds, eq(schema.refunds.status, RefundStatus.Pending))} pending, ${countRows(schema.refunds, eq(schema.refunds.status, RefundStatus.Failed))} failed, ${countRows(schema.refunds, eq(schema.refunds.status, RefundStatus.Issued))} issued)`
   );
   console.log(
     `  Teams: ${countRows(schema.teams)}, coupons: ${countRows(schema.coupons)} (${countRows(schema.coupons, isNotNull(schema.coupons.redeemedByUserId))} redeemed)`
