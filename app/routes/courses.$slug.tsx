@@ -17,7 +17,6 @@ import {
   purchases,
   coupons,
   refundRequests,
-  videoWatchEvents,
   LessonProgressStatus,
   RefundRequestStatus,
 } from "~/db/schema";
@@ -49,6 +48,7 @@ import { data, isRouteErrorResponse } from "react-router";
 import { formatDuration, formatPrice } from "~/lib/utils";
 import { renderMarkdown } from "~/lib/markdown.server";
 import { resolveCountry } from "~/lib/country.server";
+import { getSecondsWatchedInCourse } from "~/lib/watch-time.server";
 import {
   calculatePppPrice,
   getCountryTierInfo,
@@ -410,26 +410,6 @@ function getCompletedLessonCount(userId: number, lessonIds: number[]) {
   return result?.count ?? 0;
 }
 
-function getSecondsWatched(userId: number, lessonIds: number[]) {
-  if (lessonIds.length === 0) return 0;
-
-  const furthestPerLesson = db
-    .select({
-      furthest: sql<number>`max(${videoWatchEvents.positionSeconds})`,
-    })
-    .from(videoWatchEvents)
-    .where(
-      and(
-        eq(videoWatchEvents.userId, userId),
-        inArray(videoWatchEvents.lessonId, lessonIds)
-      )
-    )
-    .groupBy(videoWatchEvents.lessonId)
-    .all();
-
-  return furthestPerLesson.reduce((total, row) => total + row.furthest, 0);
-}
-
 // Compare whole days, not hours — a purchase at 23:00 should still get its
 // full fourteenth day.
 function asDayString(when: Date) {
@@ -468,7 +448,7 @@ function getRefundOffer(userId: number, course: { id: number }) {
     }
   }
 
-  if (getSecondsWatched(userId, lessonIds) >= REFUND_WATCH_LIMIT_SECONDS) {
+  if (getSecondsWatchedInCourse(userId, course.id) >= REFUND_WATCH_LIMIT_SECONDS) {
     return null;
   }
 
