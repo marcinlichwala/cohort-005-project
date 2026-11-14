@@ -14,6 +14,7 @@ import {
   type OpenRefundRequestRow,
 } from "~/lib/refunds.server";
 import { RefundRequestStatus, RefundStatus } from "~/db/schema";
+import { canChangeRefundStatus } from "~/lib/refund-status";
 import { formatPrice } from "~/lib/utils";
 import { parseFormData } from "~/lib/validation";
 import { ConfirmAction } from "~/components/confirm-action";
@@ -66,7 +67,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   await requirePlatformAdmin(request);
 
   const { open, decided } = listRefundRequests();
-  return { openRequests: open, decidedRequests: decided };
+  return { openRefundRequests: open, decidedRefundRequests: decided };
 }
 
 export async function action({ request }: Route.ActionArgs) {
@@ -106,7 +107,7 @@ export async function action({ request }: Route.ActionArgs) {
 }
 
 export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
-  const { openRequests, decidedRequests } = loaderData;
+  const { openRefundRequests, decidedRefundRequests } = loaderData;
 
   return (
     <div className="mx-auto max-w-7xl p-6 lg:p-8">
@@ -125,116 +126,193 @@ export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
         </p>
       </div>
 
-      <OpenRefundRequestsSection requests={openRequests} />
-      <DecidedRefundRequestsSection requests={decidedRequests} />
+      <OpenRefundRequestsSection refundRequests={openRefundRequests} />
+      <DecidedRefundRequestsSection refundRequests={decidedRefundRequests} />
     </div>
+  );
+}
+
+// ─── Shared table pieces ───
+
+/**
+ * The frame both sections share: a card holding a table with these column
+ * headings, or the empty state when there are no rows.
+ */
+function RefundRequestsTable({
+  headings,
+  empty,
+  children,
+}: {
+  headings: string[];
+  empty: React.ReactNode | null;
+  children: React.ReactNode;
+}) {
+  if (empty) {
+    return (
+      <Card>
+        <CardContent className="py-8 text-center text-muted-foreground">
+          {empty}
+        </CardContent>
+      </Card>
+    );
+  }
+  return (
+    <Card>
+      <CardContent className="p-0">
+        <div className="overflow-x-auto">
+          <table className="w-full">
+            <thead>
+              <tr className="border-b border-border bg-muted/50">
+                {headings.map((heading) => (
+                  <th
+                    key={heading}
+                    className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-muted-foreground"
+                  >
+                    {heading}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>{children}</tbody>
+          </table>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+const ROW_CLASS = "border-b border-border align-top last:border-0";
+
+/** The learner, course and amount paid cells, the same in both sections. */
+function WhoAndWhatCells({
+  refundRequest,
+}: {
+  refundRequest: {
+    learnerName: string;
+    learnerEmail: string;
+    courseTitle: string;
+    amountPaid: number;
+  };
+}) {
+  return (
+    <>
+      <td className="px-4 py-3 text-sm">
+        <div className="font-medium">{refundRequest.learnerName}</div>
+        <div className="text-muted-foreground">
+          {refundRequest.learnerEmail}
+        </div>
+      </td>
+      <td className="px-4 py-3 text-sm">{refundRequest.courseTitle}</td>
+      <td className="px-4 py-3 text-sm">
+        {formatPrice(refundRequest.amountPaid)}
+      </td>
+    </>
+  );
+}
+
+/**
+ * Days since purchase and hours watched: the facts an admin judges by
+ * (ADR 0001), shown on decided requests too.
+ */
+function DecisionFactCells({
+  refundRequest,
+}: {
+  refundRequest: { daysSincePurchase: number; hoursWatched: number };
+}) {
+  return (
+    <>
+      <td className="px-4 py-3 text-sm">
+        {refundRequest.daysSincePurchase}{" "}
+        {refundRequest.daysSincePurchase === 1 ? "day" : "days"}
+      </td>
+      <td className="px-4 py-3 text-sm">
+        {formatHours(refundRequest.hoursWatched)}
+      </td>
+    </>
+  );
+}
+
+function ReasonCell({ reason }: { reason: string }) {
+  return (
+    <td className="max-w-md whitespace-pre-wrap px-4 py-3 text-sm">{reason}</td>
   );
 }
 
 // ─── Open Refund Requests ───
 
 function OpenRefundRequestsSection({
-  requests,
+  refundRequests,
 }: {
-  requests: OpenRefundRequestRow[];
+  refundRequests: OpenRefundRequestRow[];
 }) {
   return (
     <section>
       <div className="mb-4 flex items-center gap-2 text-sm text-muted-foreground">
         <ReceiptText className="size-4" />
         <span>
-          {requests.length} open{" "}
-          {requests.length === 1 ? "request" : "requests"}
+          {refundRequests.length} open{" "}
+          {refundRequests.length === 1 ? "request" : "requests"}
         </span>
       </div>
 
-      {requests.length === 0 ? (
-        <Card>
-          <CardContent className="py-8 text-center">
-            <ReceiptText className="mx-auto mb-3 size-8 text-muted-foreground/50" />
-            <p className="mb-1 text-muted-foreground">
-              No Open Refund Requests.
-            </p>
-            <p className="text-sm text-muted-foreground">
-              New requests from learners will appear here.
-            </p>
-          </CardContent>
-        </Card>
-      ) : (
-        <Card>
-          <CardContent className="p-0">
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b border-border bg-muted/50">
-                    <HeaderCell>Learner</HeaderCell>
-                    <HeaderCell>Course</HeaderCell>
-                    <HeaderCell>Amount paid</HeaderCell>
-                    <HeaderCell>Since purchase</HeaderCell>
-                    <HeaderCell>Watched</HeaderCell>
-                    <HeaderCell>Reason</HeaderCell>
-                    <HeaderCell>Decide</HeaderCell>
-                  </tr>
-                </thead>
-                <tbody>
-                  {requests.map((request) => (
-                    <OpenRefundRequestRowView
-                      key={request.id}
-                      request={request}
-                    />
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </CardContent>
-        </Card>
-      )}
+      <RefundRequestsTable
+        headings={[
+          "Learner",
+          "Course",
+          "Amount paid",
+          "Since purchase",
+          "Watched",
+          "Reason",
+          "Decide",
+        ]}
+        empty={
+          refundRequests.length === 0 && (
+            <>
+              <ReceiptText className="mx-auto mb-3 size-8 text-muted-foreground/50" />
+              <p className="mb-1">No Open Refund Requests.</p>
+              <p className="text-sm">
+                New requests from learners will appear here.
+              </p>
+            </>
+          )
+        }
+      >
+        {refundRequests.map((refundRequest) => (
+          <OpenRefundRequestRowView
+            key={refundRequest.id}
+            refundRequest={refundRequest}
+          />
+        ))}
+      </RefundRequestsTable>
     </section>
   );
 }
 
-function HeaderCell({ children }: { children: React.ReactNode }) {
-  return (
-    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-muted-foreground">
-      {children}
-    </th>
-  );
-}
-
 function OpenRefundRequestRowView({
-  request,
+  refundRequest,
 }: {
-  request: OpenRefundRequestRow;
+  refundRequest: OpenRefundRequestRow;
 }) {
   return (
-    <tr className="border-b border-border align-top last:border-0">
-      <td className="px-4 py-3 text-sm">
-        <div className="font-medium">{request.learnerName}</div>
-        <div className="text-muted-foreground">{request.learnerEmail}</div>
-      </td>
-      <td className="px-4 py-3 text-sm">{request.courseTitle}</td>
-      <td className="px-4 py-3 text-sm">{formatPrice(request.amountPaid)}</td>
-      <td className="px-4 py-3 text-sm">
-        {request.daysSincePurchase}{" "}
-        {request.daysSincePurchase === 1 ? "day" : "days"}
-      </td>
-      <td className="px-4 py-3 text-sm">
-        {formatHours(request.hoursWatched)}
-      </td>
-      <td className="max-w-md whitespace-pre-wrap px-4 py-3 text-sm">
-        {request.reason}
-      </td>
+    <tr className={ROW_CLASS}>
+      <WhoAndWhatCells refundRequest={refundRequest} />
+      <DecisionFactCells refundRequest={refundRequest} />
+      <ReasonCell reason={refundRequest.reason} />
       <td className="px-4 py-3 text-sm">
         <div className="flex flex-wrap gap-2">
-          <ApproveRefundRequest request={request} />
-          <DeclineRefundRequest request={request} />
+          <ApproveRefundRequest refundRequest={refundRequest} />
+          <DeclineRefundRequest refundRequest={refundRequest} />
         </div>
       </td>
     </tr>
   );
 }
 
-function ApproveRefundRequest({ request }: { request: OpenRefundRequestRow }) {
+function ApproveRefundRequest({
+  refundRequest,
+}: {
+  refundRequest: OpenRefundRequestRow;
+}) {
   // No eligibility warning here on purpose: the admin may approve past the
   // window or the watch limit (ADR 0001). The facts are in the row.
   return (
@@ -243,20 +321,24 @@ function ApproveRefundRequest({ request }: { request: OpenRefundRequestRow }) {
       title="Approve this Refund Request?"
       description={
         <>
-          {request.learnerName} will get a Pending Refund of{" "}
-          <strong>{formatPrice(request.amountPaid)}</strong>, the full amount
-          paid for {request.courseTitle}, and an approval email. You can't
-          undo this.
+          {refundRequest.learnerName} will get a Pending Refund of{" "}
+          <strong>{formatPrice(refundRequest.amountPaid)}</strong>, the full
+          amount paid for {refundRequest.courseTitle}, and an approval email.
+          You can't undo this.
         </>
       }
       confirmLabel="Approve request"
-      fields={{ intent: "approve", refundRequestId: String(request.id) }}
+      fields={{ intent: "approve", refundRequestId: String(refundRequest.id) }}
     />
   );
 }
 
-function DeclineRefundRequest({ request }: { request: OpenRefundRequestRow }) {
-  const noteId = `decline-note-${request.id}`;
+function DeclineRefundRequest({
+  refundRequest,
+}: {
+  refundRequest: OpenRefundRequestRow;
+}) {
+  const noteId = `decline-note-${refundRequest.id}`;
   return (
     <ConfirmAction
       triggerLabel="Decline"
@@ -264,13 +346,14 @@ function DeclineRefundRequest({ request }: { request: OpenRefundRequestRow }) {
       title="Decline this Refund Request?"
       description={
         <>
-          {request.learnerName} will get an email saying their request for{" "}
-          {request.courseTitle} ({formatPrice(request.amountPaid)}) was
-          declined. They can raise a new one later.
+          {refundRequest.learnerName} will get an email saying their request
+          for {refundRequest.courseTitle} (
+          {formatPrice(refundRequest.amountPaid)}) was declined. They can
+          raise a new one later.
         </>
       }
       confirmLabel="Decline request"
-      fields={{ intent: "decline", refundRequestId: String(request.id) }}
+      fields={{ intent: "decline", refundRequestId: String(refundRequest.id) }}
     >
       <div className="space-y-2">
         <Label htmlFor={noteId}>Decline Note (optional)</Label>
@@ -288,71 +371,55 @@ function DeclineRefundRequest({ request }: { request: OpenRefundRequestRow }) {
 // ─── History: decided Refund Requests ───
 
 function DecidedRefundRequestsSection({
-  requests,
+  refundRequests,
 }: {
-  requests: DecidedRefundRequestRow[];
+  refundRequests: DecidedRefundRequestRow[];
 }) {
   return (
     <section className="mt-12">
       <h2 className="mb-4 text-xl font-semibold">History</h2>
-      {requests.length === 0 ? (
-        <Card>
-          <CardContent className="py-8 text-center text-muted-foreground">
-            No decided Refund Requests yet.
-          </CardContent>
-        </Card>
-      ) : (
-        <Card>
-          <CardContent className="p-0">
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b border-border bg-muted/50">
-                    <HeaderCell>Learner</HeaderCell>
-                    <HeaderCell>Course</HeaderCell>
-                    <HeaderCell>Amount paid</HeaderCell>
-                    <HeaderCell>Decision</HeaderCell>
-                    <HeaderCell>Decided</HeaderCell>
-                    <HeaderCell>Refund</HeaderCell>
-                    <HeaderCell>Reason</HeaderCell>
-                  </tr>
-                </thead>
-                <tbody>
-                  {requests.map((request) => (
-                    <DecidedRefundRequestRowView
-                      key={request.id}
-                      request={request}
-                    />
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </CardContent>
-        </Card>
-      )}
+      <RefundRequestsTable
+        headings={[
+          "Learner",
+          "Course",
+          "Amount paid",
+          "Since purchase",
+          "Watched",
+          "Decision",
+          "Decided",
+          "Refund",
+          "Reason",
+        ]}
+        empty={
+          refundRequests.length === 0 && "No decided Refund Requests yet."
+        }
+      >
+        {refundRequests.map((refundRequest) => (
+          <DecidedRefundRequestRowView
+            key={refundRequest.id}
+            refundRequest={refundRequest}
+          />
+        ))}
+      </RefundRequestsTable>
     </section>
   );
 }
 
 function DecidedRefundRequestRowView({
-  request,
+  refundRequest,
 }: {
-  request: DecidedRefundRequestRow;
+  refundRequest: DecidedRefundRequestRow;
 }) {
   return (
-    <tr className="border-b border-border align-top last:border-0">
+    <tr className={ROW_CLASS}>
+      <WhoAndWhatCells refundRequest={refundRequest} />
+      <DecisionFactCells refundRequest={refundRequest} />
       <td className="px-4 py-3 text-sm">
-        <div className="font-medium">{request.learnerName}</div>
-        <div className="text-muted-foreground">{request.learnerEmail}</div>
-      </td>
-      <td className="px-4 py-3 text-sm">{request.courseTitle}</td>
-      <td className="px-4 py-3 text-sm">{formatPrice(request.amountPaid)}</td>
-      <td className="px-4 py-3 text-sm">
-        <DecisionPill status={request.status} />
-        {request.status === RefundRequestStatus.Declined && (
+        <DecisionPill status={refundRequest.status} />
+        {refundRequest.status === RefundRequestStatus.Declined && (
           <p className="mt-2 max-w-xs whitespace-pre-wrap text-muted-foreground">
-            {request.declineNote ? (
-              <>Note: {request.declineNote}</>
+            {refundRequest.declineNote ? (
+              <>Note: {refundRequest.declineNote}</>
             ) : (
               <span className="italic">No Decline Note</span>
             )}
@@ -360,51 +427,53 @@ function DecidedRefundRequestRowView({
         )}
       </td>
       <td className="px-4 py-3 text-sm text-muted-foreground">
-        {request.resolvedAt
-          ? new Date(request.resolvedAt).toLocaleDateString()
+        {refundRequest.resolvedAt
+          ? new Date(refundRequest.resolvedAt).toLocaleDateString()
           : "—"}
-        {request.resolvedByName && <div>by {request.resolvedByName}</div>}
+        {refundRequest.resolvedByName && (
+          <div>by {refundRequest.resolvedByName}</div>
+        )}
       </td>
       <td className="px-4 py-3 text-sm">
-        {request.refundStatus ? (
+        {refundRequest.refundStatus ? (
           <>
-            <RefundStatusPill status={request.refundStatus} />
-            {request.refundStatusChangedAt && (
+            <RefundStatusPill status={refundRequest.refundStatus} />
+            {refundRequest.refundStatusChangedAt && (
               <div className="mt-1 text-muted-foreground">
-                {new Date(request.refundStatusChangedAt).toLocaleDateString()}
-                {request.refundStatusChangedByName &&
-                  ` by ${request.refundStatusChangedByName}`}
+                {new Date(
+                  refundRequest.refundStatusChangedAt
+                ).toLocaleDateString()}
+                {refundRequest.refundStatusChangedByName &&
+                  ` by ${refundRequest.refundStatusChangedByName}`}
               </div>
             )}
-            <RefundStatusControls request={request} />
+            <RefundStatusControls refundRequest={refundRequest} />
           </>
         ) : (
           <span className="text-muted-foreground">—</span>
         )}
       </td>
-      <td className="max-w-md whitespace-pre-wrap px-4 py-3 text-sm">
-        {request.reason}
-      </td>
+      <ReasonCell reason={refundRequest.reason} />
     </tr>
   );
 }
 
-// Only the changes the refund module allows are offered: Pending can become
-// Issued or Failed, Failed can become Issued, and Issued is final.
+// Only the changes the refund module allows are offered, using the same
+// rules it enforces.
 function RefundStatusControls({
-  request,
+  refundRequest,
 }: {
-  request: DecidedRefundRequestRow;
+  refundRequest: DecidedRefundRequestRow;
 }) {
-  const { refundId, refundStatus } = request;
+  const { refundId, refundStatus } = refundRequest;
   if (refundId === null || refundStatus === null) return null;
-  const canMarkIssued =
-    refundStatus === RefundStatus.Pending ||
-    refundStatus === RefundStatus.Failed;
-  const canMarkFailed = refundStatus === RefundStatus.Pending;
+  const canMarkIssued = canChangeRefundStatus(refundStatus, RefundStatus.Issued);
+  const canMarkFailed = canChangeRefundStatus(refundStatus, RefundStatus.Failed);
   if (!canMarkIssued && !canMarkFailed) return null;
 
-  const amount = formatPrice(request.refundAmount ?? request.amountPaid);
+  const amount = formatPrice(
+    refundRequest.refundAmount ?? refundRequest.amountPaid
+  );
   return (
     <div className="mt-2 flex flex-wrap gap-2">
       {canMarkIssued && (
@@ -414,9 +483,9 @@ function RefundStatusControls({
           description={
             <>
               Confirm you have sent <strong>{amount}</strong> to{" "}
-              {request.learnerName}. Their enrollment in {request.courseTitle}{" "}
-              ends (progress is kept) and they get a "your money is on its
-              way" email. Issued is final.
+              {refundRequest.learnerName}. Their enrollment in{" "}
+              {refundRequest.courseTitle} ends (progress is kept) and they get
+              a "your money is on its way" email. Issued is final.
             </>
           }
           confirmLabel="Mark Issued"
@@ -430,9 +499,9 @@ function RefundStatusControls({
           title="Mark this Refund Failed?"
           description={
             <>
-              The {amount} to {request.learnerName} couldn't be sent. No email
-              goes out and they keep access. You can mark it Issued after a
-              successful retry.
+              The {amount} to {refundRequest.learnerName} couldn't be sent. No
+              email goes out and they keep access. You can mark it Issued
+              after a successful retry.
             </>
           }
           confirmLabel="Mark Failed"

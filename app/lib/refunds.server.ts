@@ -1,5 +1,5 @@
 import { alias } from "drizzle-orm/sqlite-core";
-import { and, asc, desc, eq, isNull, ne } from "drizzle-orm";
+import { and, asc, desc, eq, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
 import { db } from "~/db";
 import {
   coupons,
@@ -12,10 +12,15 @@ import {
   RefundRequestStatus,
   RefundStatus,
 } from "~/db/schema";
+import { canChangeRefundStatus } from "~/lib/refund-status";
 import { daysSince, formatPrice } from "~/lib/utils";
 import { getSecondsWatchedInCourse } from "~/lib/watch-time.server";
 
+export { canChangeRefundStatus };
+
 const SECONDS_PER_HOUR = 60 * 60;
+
+type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 /**
  * The refund module for admins: every admin operation on Refund Requests
@@ -55,12 +60,23 @@ export function listOpenRefundRequests() {
     .orderBy(asc(refundRequests.requestedAt), asc(refundRequests.id))
     .all();
 
-  return rows.map((row) => ({
+  return rows.map(withDecisionFacts);
+}
+
+/**
+ * Adds the numbers an admin judges a Refund Request by: whole days since the
+ * purchase, and hours watched (the furthest point reached in each lesson,
+ * added up, the same calculation the request route uses).
+ */
+function withDecisionFacts<
+  T extends { learnerId: number; courseId: number; purchasedAt: string },
+>(row: T) {
+  return {
     ...row,
     daysSincePurchase: daysSince(row.purchasedAt),
     hoursWatched:
       getSecondsWatchedInCourse(row.learnerId, row.courseId) / SECONDS_PER_HOUR,
-  }));
+  };
 }
 
 export type DecidedRefundRequestRow = ReturnType<
@@ -75,7 +91,7 @@ const refundStatusChangers = alias(users, "refund_status_changers");
  * recently decided first, for the history section.
  */
 export function listDecidedRefundRequests() {
-  return db
+  const rows = db
     .select({
       id: refundRequests.id,
       status: refundRequests.status,
@@ -84,10 +100,13 @@ export function listDecidedRefundRequests() {
       requestedAt: refundRequests.requestedAt,
       resolvedAt: refundRequests.resolvedAt,
       resolvedByName: resolvers.name,
+      learnerId: users.id,
       learnerName: users.name,
       learnerEmail: users.email,
+      courseId: courses.id,
       courseTitle: courses.title,
       amountPaid: purchases.amountPaid,
+      purchasedAt: purchases.createdAt,
       // Null for a Declined Refund Request, which has no Refund.
       refundId: refunds.id,
       refundStatus: refunds.status,
@@ -108,6 +127,8 @@ export function listDecidedRefundRequests() {
     .where(ne(refundRequests.status, RefundRequestStatus.Open))
     .orderBy(desc(refundRequests.resolvedAt), desc(refundRequests.id))
     .all();
+
+  return rows.map(withDecisionFacts);
 }
 
 /**
@@ -119,6 +140,47 @@ export function listRefundRequests() {
     open: listOpenRefundRequests(),
     decided: listDecidedRefundRequests(),
   };
+}
+
+// ─── Learner side ───
+
+export type LearnerRefundRequestRow = ReturnType<
+  typeof listLearnerRefundRequests
+>[number];
+
+/**
+ * A learner's own Refund Requests for their settings page: Open ones first,
+ * then decided ones most recently decided first, with the Decline Note and
+ * the Refund status where there is one.
+ */
+export function listLearnerRefundRequests(learnerId: number) {
+  return db
+    .select({
+      id: refundRequests.id,
+      status: refundRequests.status,
+      courseTitle: courses.title,
+      courseSlug: courses.slug,
+      amountPaid: purchases.amountPaid,
+      reason: refundRequests.reason,
+      requestedAt: refundRequests.requestedAt,
+      resolvedAt: refundRequests.resolvedAt,
+      declineNote: refundRequests.declineNote,
+      // Null unless the Refund Request is Approved.
+      refundStatus: refunds.status,
+      refundAmount: refunds.amount,
+    })
+    .from(refundRequests)
+    .innerJoin(purchases, eq(refundRequests.purchaseId, purchases.id))
+    .innerJoin(courses, eq(purchases.courseId, courses.id))
+    .leftJoin(refunds, eq(refunds.refundRequestId, refundRequests.id))
+    .where(eq(purchases.userId, learnerId))
+    .orderBy(
+      sql`case when ${refundRequests.status} = ${RefundRequestStatus.Open} then 0 else 1 end`,
+      desc(refundRequests.resolvedAt),
+      desc(refundRequests.requestedAt),
+      desc(refundRequests.id)
+    )
+    .all();
 }
 
 /**
@@ -137,6 +199,44 @@ export function findOpenRefundRequest(purchaseId: number) {
       )
     )
     .get();
+}
+
+/**
+ * The Approved Refund Request on a purchase, if any, or any Refund Request
+ * that has a Refund. A purchase is refunded at most once, so once one exists
+ * nothing more can be asked for or approved on it.
+ */
+function findApprovedRefundRequest(
+  executor: typeof db | Transaction,
+  purchaseId: number
+) {
+  return executor
+    .select({ id: refundRequests.id, status: refundRequests.status })
+    .from(refundRequests)
+    .leftJoin(refunds, eq(refunds.refundRequestId, refundRequests.id))
+    .where(
+      and(
+        eq(refundRequests.purchaseId, purchaseId),
+        or(
+          eq(refundRequests.status, RefundRequestStatus.Approved),
+          isNotNull(refunds.id)
+        )
+      )
+    )
+    .get();
+}
+
+/**
+ * The Refund Request that stops a learner raising a new one on a purchase:
+ * an Open one (only one can be undecided at once) or an Approved one (a
+ * purchase is refunded at most once). A Declined request doesn't block.
+ * The request route and the course page both ask this.
+ */
+export function findRefundRequestBlockingNewRequest(purchaseId: number) {
+  return (
+    findOpenRefundRequest(purchaseId) ??
+    findApprovedRefundRequest(db, purchaseId)
+  );
 }
 
 // ─── Errors ───
@@ -165,6 +265,7 @@ export function approveRefundRequest(requestId: number, adminUserId: number) {
     const request = tx
       .select({
         status: refundRequests.status,
+        purchaseId: refundRequests.purchaseId,
         amountPaid: purchases.amountPaid,
         learnerName: users.name,
         learnerEmail: users.email,
@@ -185,10 +286,16 @@ export function approveRefundRequest(requestId: number, adminUserId: number) {
         `This Refund Request has already been ${request.status}, so it can't be approved.`
       );
     }
+    if (findApprovedRefundRequest(tx, request.purchaseId)) {
+      throw new RefundRuleError(
+        "This purchase already has an Approved Refund Request, so it can't be refunded again."
+      );
+    }
 
     const now = new Date().toISOString();
 
-    tx.update(refundRequests)
+    const { changes } = tx
+      .update(refundRequests)
       .set({
         status: RefundRequestStatus.Approved,
         resolvedAt: now,
@@ -201,6 +308,10 @@ export function approveRefundRequest(requestId: number, adminUserId: number) {
         )
       )
       .run();
+    // The guard above lost a race: another admin decided it first.
+    if (changes === 0) {
+      throw new RefundRuleError("Another admin has just decided this Refund Request.");
+    }
 
     const refund = tx
       .insert(refunds)
@@ -267,7 +378,8 @@ export function declineRefundRequest(
 
     const note = declineNote?.trim() || null;
 
-    tx.update(refundRequests)
+    const { changes } = tx
+      .update(refundRequests)
       .set({
         status: RefundRequestStatus.Declined,
         declineNote: note,
@@ -281,6 +393,10 @@ export function declineRefundRequest(
         )
       )
       .run();
+    // The guard above lost a race: another admin decided it first.
+    if (changes === 0) {
+      throw new RefundRuleError("Another admin has just decided this Refund Request.");
+    }
 
     return buildDeclineEmail({
       learnerName: request.learnerName,
@@ -295,8 +411,6 @@ export function declineRefundRequest(
 }
 
 // ─── Mark Issued / Mark Failed ───
-
-type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 /** The facts about a Refund that its status changes and side effects need. */
 type RefundContext = {
@@ -336,16 +450,6 @@ function loadRefund(tx: Transaction, refundId: number): RefundContext {
   return refund;
 }
 
-/**
- * The allowed Refund status changes. Issued is final; a Failed Refund can
- * be retried and later marked Issued.
- */
-const ALLOWED_REFUND_CHANGES: Record<RefundStatus, readonly RefundStatus[]> = {
-  [RefundStatus.Pending]: [RefundStatus.Issued, RefundStatus.Failed],
-  [RefundStatus.Failed]: [RefundStatus.Issued],
-  [RefundStatus.Issued]: [],
-};
-
 const REFUND_STATUS_PAST: Record<RefundStatus, string> = {
   [RefundStatus.Pending]: "pending",
   [RefundStatus.Issued]: "been issued",
@@ -362,13 +466,14 @@ function changeRefundStatus(
   to: RefundStatus,
   adminUserId: number
 ) {
-  if (!ALLOWED_REFUND_CHANGES[refund.status].includes(to)) {
+  if (!canChangeRefundStatus(refund.status, to)) {
     throw new RefundRuleError(
       `This Refund has already ${REFUND_STATUS_PAST[refund.status]}, so it can't be marked ${to}.`
     );
   }
 
-  tx.update(refunds)
+  const { changes } = tx
+    .update(refunds)
     .set({
       status: to,
       statusChangedAt: new Date().toISOString(),
@@ -378,6 +483,9 @@ function changeRefundStatus(
     // can't both apply a change.
     .where(and(eq(refunds.id, refund.refundId), eq(refunds.status, refund.status)))
     .run();
+  if (changes === 0) {
+    throw new RefundRuleError("Another admin has just changed this Refund.");
+  }
 }
 
 /**

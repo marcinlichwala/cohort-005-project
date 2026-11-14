@@ -16,9 +16,7 @@ import {
   courseRatings,
   purchases,
   coupons,
-  refundRequests,
   LessonProgressStatus,
-  RefundRequestStatus,
 } from "~/db/schema";
 import { eq, and, or, sql, inArray, isNotNull } from "drizzle-orm";
 import { Card, CardContent, CardHeader } from "~/components/ui/card";
@@ -49,6 +47,7 @@ import { formatDuration, formatPrice } from "~/lib/utils";
 import { renderMarkdown } from "~/lib/markdown.server";
 import { resolveCountry } from "~/lib/country.server";
 import { getSecondsWatchedInCourse } from "~/lib/watch-time.server";
+import { findRefundRequestBlockingNewRequest } from "~/lib/refunds.server";
 import {
   calculatePppPrice,
   getCountryTierInfo,
@@ -379,19 +378,6 @@ function getPurchaseForCourse(userId: number, courseId: number) {
     .get();
 }
 
-function getOpenRefundRequest(purchaseId: number) {
-  return db
-    .select({ id: refundRequests.id })
-    .from(refundRequests)
-    .where(
-      and(
-        eq(refundRequests.purchaseId, purchaseId),
-        eq(refundRequests.status, RefundRequestStatus.Open)
-      )
-    )
-    .get();
-}
-
 function getCompletedLessonCount(userId: number, lessonIds: number[]) {
   if (lessonIds.length === 0) return 0;
 
@@ -427,7 +413,7 @@ function getRefundOffer(userId: number, course: { id: number }) {
   const purchase = getPurchaseForCourse(userId, course.id);
 
   if (!purchase) return null;
-  if (getOpenRefundRequest(purchase.id)) return null;
+  if (findRefundRequestBlockingNewRequest(purchase.id)) return null;
 
   const purchasedDay = asDayString(new Date(purchase.createdAt));
   const windowEnd = new Date(purchase.createdAt);

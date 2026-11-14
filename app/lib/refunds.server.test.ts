@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import {
   coupons,
@@ -32,8 +32,11 @@ vi.mock("~/db", () => ({
 
 import {
   approveRefundRequest,
+  canChangeRefundStatus,
   declineRefundRequest,
   findOpenRefundRequest,
+  findRefundRequestBlockingNewRequest,
+  listLearnerRefundRequests,
   listOpenRefundRequests,
   listRefundRequests,
   markRefundFailed,
@@ -145,6 +148,18 @@ function addWatchEvent(userId: number, lessonId: number, positionSeconds: number
     .insert(videoWatchEvents)
     .values({ userId, lessonId, eventType: "progress", positionSeconds })
     .run();
+}
+
+/**
+ * Makes every UPDATE on a table change nothing, the way it would if another
+ * admin had changed the row between our read and our status-guarded write.
+ */
+function makeUpdatesChangeNothing(table: "refund_requests" | "refunds") {
+  testDb.run(
+    sql.raw(
+      `CREATE TRIGGER lost_race_${table} BEFORE UPDATE ON ${table} BEGIN SELECT RAISE(IGNORE); END`
+    )
+  );
 }
 
 /** A learner who bought the base course and has an Open Refund Request. */
@@ -329,6 +344,22 @@ describe("refund module for admins", () => {
         declinedEarlier.request.id,
       ]);
     });
+    it("reports days since purchase and hours watched on decided requests too", () => {
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      const admin = addAdmin();
+      const { learner, request } = addOpenRequest(base, {
+        name: "Liam Learner",
+        purchasedDaysAgo: 9,
+        requestedDaysAgo: 4,
+      });
+      const lesson = addLesson(base.course.id, "Intro");
+      addWatchEvent(learner.id, lesson.id, 2700);
+      approveRefundRequest(request.id, admin.id);
+
+      const [row] = listRefundRequests().decided;
+
+      expect(row).toMatchObject({ daysSincePurchase: 9, hoursWatched: 0.75 });
+    });
   });
 
   // ─── Declining a Refund Request ───
@@ -423,6 +454,16 @@ describe("refund module for admins", () => {
       );
     });
 
+    it("rejects the decline when the guarded update changes nothing", () => {
+      const admin = addAdmin();
+      const { request } = addOpenRequest(base, { name: "Liam Learner", requestedDaysAgo: 3 });
+      makeUpdatesChangeNothing("refund_requests");
+
+      expect(() => declineRefundRequest(request.id, admin.id, "Too late.")).toThrow(
+        new RefundRuleError("Another admin has just decided this Refund Request.")
+      );
+    });
+
     it("lets the learner raise a new Refund Request for the same purchase after a decline", () => {
       const admin = addAdmin();
       const { request, purchase } = addOpenRequest(base, { name: "Liam Learner", requestedDaysAgo: 3 });
@@ -432,6 +473,114 @@ describe("refund module for admins", () => {
 
       // The request route refuses a new request only while one is Open.
       expect(findOpenRefundRequest(purchase.id)).toBeUndefined();
+    });
+  });
+
+  // ─── Whether a learner may raise a new Refund Request ───
+
+  describe("findRefundRequestBlockingNewRequest", () => {
+    beforeEach(() => {
+      vi.spyOn(console, "log").mockImplementation(() => {});
+    });
+
+    it("blocks a new request while one is Open", () => {
+      const { purchase, request } = addOpenRequest(base, { name: "Liam Learner", requestedDaysAgo: 3 });
+
+      expect(findRefundRequestBlockingNewRequest(purchase.id)).toMatchObject({
+        id: request.id,
+        status: RefundRequestStatus.Open,
+      });
+    });
+
+    it("blocks a new request once one is Approved, so a purchase can't be refunded twice", () => {
+      const admin = addAdmin();
+      const { purchase, request } = addOpenRequest(base, { name: "Liam Learner", requestedDaysAgo: 3 });
+      approveRefundRequest(request.id, admin.id);
+
+      expect(findRefundRequestBlockingNewRequest(purchase.id)).toMatchObject({
+        id: request.id,
+        status: RefundRequestStatus.Approved,
+      });
+    });
+
+    it("doesn't block after a decline: the learner may ask again", () => {
+      const admin = addAdmin();
+      const { purchase, request } = addOpenRequest(base, { name: "Liam Learner", requestedDaysAgo: 3 });
+      declineRefundRequest(request.id, admin.id);
+
+      expect(findRefundRequestBlockingNewRequest(purchase.id)).toBeUndefined();
+    });
+
+    it("doesn't block a purchase with no Refund Requests", () => {
+      const learner = addLearner("Nina New", "nina@example.com");
+      const purchase = addPurchase({
+        userId: learner.id,
+        courseId: base.course.id,
+        amountPaid: 7900,
+        purchasedDaysAgo: 2,
+      });
+
+      expect(findRefundRequestBlockingNewRequest(purchase.id)).toBeUndefined();
+    });
+  });
+
+  // ─── The learner's own Refund Requests (settings page) ───
+
+  describe("listLearnerRefundRequests", () => {
+    beforeEach(() => {
+      vi.spyOn(console, "log").mockImplementation(() => {});
+    });
+
+    it("lists the learner's Open requests first, then decided ones most recent first, with the Decline Note and Refund status", () => {
+      const admin = addAdmin();
+      const learner = addLearner("Liam Learner", "liam@example.com");
+      const buy = (title: string) =>
+        addPurchase({
+          userId: learner.id,
+          courseId: addCourse(base, title).id,
+          amountPaid: 4900,
+          purchasedDaysAgo: 5,
+        });
+      const declined = addRefundRequest({ purchaseId: buy("Declined Course").id, requestedDaysAgo: 4 });
+      const approved = addRefundRequest({ purchaseId: buy("Approved Course").id, requestedDaysAgo: 3 });
+      const open = addRefundRequest({ purchaseId: buy("Open Course").id, requestedDaysAgo: 2 });
+      declineRefundRequest(declined.id, admin.id, "You have watched most of it.");
+      vi.setSystemTime(new Date(NOW.getTime() + 60_000));
+      const { refund } = approveRefundRequest(approved.id, admin.id);
+      markRefundFailed(refund.id, admin.id);
+
+      const rows = listLearnerRefundRequests(learner.id);
+
+      expect(rows).toEqual([
+        expect.objectContaining({
+          id: open.id,
+          status: RefundRequestStatus.Open,
+          courseTitle: "Open Course",
+          amountPaid: 4900,
+          refundStatus: null,
+        }),
+        expect.objectContaining({
+          id: approved.id,
+          status: RefundRequestStatus.Approved,
+          courseTitle: "Approved Course",
+          refundStatus: RefundStatus.Failed,
+          refundAmount: 4900,
+        }),
+        expect.objectContaining({
+          id: declined.id,
+          status: RefundRequestStatus.Declined,
+          courseTitle: "Declined Course",
+          declineNote: "You have watched most of it.",
+          refundStatus: null,
+        }),
+      ]);
+    });
+
+    it("leaves out other learners' Refund Requests", () => {
+      addOpenRequest(base, { name: "Someone Else", requestedDaysAgo: 2 });
+      const learner = addLearner("Liam Learner", "liam@example.com");
+
+      expect(listLearnerRefundRequests(learner.id)).toEqual([]);
     });
   });
 
@@ -536,6 +685,40 @@ describe("refund module for admins", () => {
       expect(row.status).toBe(RefundRequestStatus.Declined);
       expect(row.refundStatus).toBeNull();
     });
+    it("rejects approving a second Refund Request on a purchase that already has an Approved one, and creates no second Refund", () => {
+      // A purchase is refunded at most once: a second Open request on the
+      // same purchase (raised before the route refused it) can't be approved.
+      const admin = addAdmin();
+      const { purchase, request: first } = addOpenRequest(base, {
+        name: "Liam Learner",
+        requestedDaysAgo: 4,
+      });
+      approveRefundRequest(first.id, admin.id);
+      const second = addRefundRequest({ purchaseId: purchase.id, requestedDaysAgo: 1 });
+
+      expect(() => approveRefundRequest(second.id, admin.id)).toThrow(
+        new RefundRuleError(
+          "This purchase already has an Approved Refund Request, so it can't be refunded again."
+        )
+      );
+
+      const { open, decided } = listRefundRequests();
+      expect(open.map((row) => row.id)).toEqual([second.id]);
+      expect(decided.filter((row) => row.refundId !== null)).toHaveLength(1);
+    });
+
+    it("rejects the approval and creates no Refund when the guarded update changes nothing", () => {
+      // Another admin decided the request between our read and our write.
+      const admin = addAdmin();
+      const { request } = addOpenRequest(base, { name: "Liam Learner", requestedDaysAgo: 4 });
+      makeUpdatesChangeNothing("refund_requests");
+
+      expect(() => approveRefundRequest(request.id, admin.id)).toThrow(
+        new RefundRuleError("Another admin has just decided this Refund Request.")
+      );
+      expect(listRefundRequests().decided).toEqual([]);
+    });
+
     it("builds an approval email to the learner saying how much is coming back", () => {
       const admin = addAdmin();
       const { request } = addOpenRequest(base, {
@@ -794,6 +977,27 @@ describe("refund module for admins", () => {
       expect(() => markRefundFailed(refund.id, admin.id)).toThrow(
         new RefundRuleError("This Refund has already failed, so it can't be marked failed.")
       );
+    });
+
+    it("rejects the status change, and runs no side effects, when the guarded update changes nothing", () => {
+      // Another admin changed the Refund between our read and our write.
+      const { learner, refund } = addPendingRefund();
+      const admin = addAdmin("Alex Rivera");
+      makeUpdatesChangeNothing("refunds");
+
+      expect(() => markRefundIssued(refund.id, admin.id)).toThrow(
+        new RefundRuleError("Another admin has just changed this Refund.")
+      );
+      expect(enrollmentFor(learner.id)).toHaveLength(1);
+    });
+
+    it("tells the screen which Refund status changes are allowed: Issued is final, Failed can still be Issued", () => {
+      expect(canChangeRefundStatus(RefundStatus.Pending, RefundStatus.Issued)).toBe(true);
+      expect(canChangeRefundStatus(RefundStatus.Pending, RefundStatus.Failed)).toBe(true);
+      expect(canChangeRefundStatus(RefundStatus.Failed, RefundStatus.Issued)).toBe(true);
+      expect(canChangeRefundStatus(RefundStatus.Failed, RefundStatus.Failed)).toBe(false);
+      expect(canChangeRefundStatus(RefundStatus.Issued, RefundStatus.Failed)).toBe(false);
+      expect(canChangeRefundStatus(RefundStatus.Issued, RefundStatus.Issued)).toBe(false);
     });
 
     it("rejects a Refund that doesn't exist", () => {

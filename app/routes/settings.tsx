@@ -10,21 +10,16 @@ import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { Label } from "~/components/ui/label";
 import { Textarea } from "~/components/ui/textarea";
-import {
-  UserRole,
-  RefundRequestStatus,
-  users,
-  courses,
-  purchases,
-  refundRequests,
-  refunds,
-  RefundStatus,
-} from "~/db/schema";
+import { UserRole, RefundRequestStatus, users, RefundStatus } from "~/db/schema";
 import { AlertTriangle } from "lucide-react";
 import { data, isRouteErrorResponse, Link } from "react-router";
 import { db } from "~/db";
-import { and, desc, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { formatPrice } from "~/lib/utils";
+import {
+  listLearnerRefundRequests,
+  type LearnerRefundRequestRow,
+} from "~/lib/refunds.server";
 
 const settingsSchema = z.object({
   name: z.string().trim().min(1, "Name cannot be empty."),
@@ -57,69 +52,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     throw data("User not found.", { status: 404 });
   }
 
-  const openRefundRequests = db
-    .select({
-      id: refundRequests.id,
-      courseTitle: courses.title,
-      courseSlug: courses.slug,
-      amountPaid: purchases.amountPaid,
-      reason: refundRequests.reason,
-      requestedAt: refundRequests.requestedAt,
-    })
-    .from(refundRequests)
-    .innerJoin(purchases, eq(refundRequests.purchaseId, purchases.id))
-    .innerJoin(courses, eq(purchases.courseId, courses.id))
-    .where(
-      and(
-        eq(purchases.userId, currentUserId),
-        eq(refundRequests.status, RefundRequestStatus.Open)
-      )
-    )
-    .all();
-
-  const declinedRefundRequests = db
-    .select({
-      id: refundRequests.id,
-      courseTitle: courses.title,
-      courseSlug: courses.slug,
-      amountPaid: purchases.amountPaid,
-      reason: refundRequests.reason,
-      declineNote: refundRequests.declineNote,
-      resolvedAt: refundRequests.resolvedAt,
-    })
-    .from(refundRequests)
-    .innerJoin(purchases, eq(refundRequests.purchaseId, purchases.id))
-    .innerJoin(courses, eq(purchases.courseId, courses.id))
-    .where(
-      and(
-        eq(purchases.userId, currentUserId),
-        eq(refundRequests.status, RefundRequestStatus.Declined)
-      )
-    )
-    .orderBy(desc(refundRequests.resolvedAt))
-    .all();
-
-  const approvedRefundRequests = db
-    .select({
-      id: refundRequests.id,
-      courseTitle: courses.title,
-      courseSlug: courses.slug,
-      amount: refunds.amount,
-      refundStatus: refunds.status,
-      resolvedAt: refundRequests.resolvedAt,
-    })
-    .from(refundRequests)
-    .innerJoin(purchases, eq(refundRequests.purchaseId, purchases.id))
-    .innerJoin(courses, eq(purchases.courseId, courses.id))
-    .innerJoin(refunds, eq(refunds.refundRequestId, refundRequests.id))
-    .where(
-      and(
-        eq(purchases.userId, currentUserId),
-        eq(refundRequests.status, RefundRequestStatus.Approved)
-      )
-    )
-    .orderBy(desc(refundRequests.resolvedAt))
-    .all();
+  const refundRequests = listLearnerRefundRequests(currentUserId);
 
   return {
     user: {
@@ -129,9 +62,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       bio: currentUser.bio,
       role: currentUser.role,
     },
-    openRefundRequests,
-    declinedRefundRequests,
-    approvedRefundRequests,
+    refundRequests,
   };
 }
 
@@ -170,12 +101,10 @@ export async function action({ request }: Route.ActionArgs) {
 }
 
 export default function Settings({ loaderData }: Route.ComponentProps) {
-  const {
-    user,
-    openRefundRequests,
-    declinedRefundRequests,
-    approvedRefundRequests,
-  } = loaderData;
+  const { user, refundRequests } = loaderData;
+  const openCount = refundRequests.filter(
+    (refundRequest) => refundRequest.status === RefundRequestStatus.Open
+  ).length;
   const fetcher = useFetcher();
   const nameInputRef = useRef<HTMLInputElement>(null);
 
@@ -262,92 +191,108 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
         </CardContent>
       </Card>
 
-      {openRefundRequests.length +
-        declinedRefundRequests.length +
-        approvedRefundRequests.length >
-        0 && (
+      {refundRequests.length > 0 && (
         <Card className="mt-8 max-w-md">
           <CardHeader>
             <h2 className="text-lg font-semibold">Refund Requests</h2>
-            {openRefundRequests.length > 0 && (
+            {openCount > 0 && (
               <p className="text-sm text-muted-foreground">
-                {openRefundRequests.length === 1
+                {openCount === 1
                   ? "One refund request is waiting on us."
-                  : `${openRefundRequests.length} refund requests are waiting on us.`}
+                  : `${openCount} refund requests are waiting on us.`}
               </p>
             )}
           </CardHeader>
           <CardContent className="space-y-4">
-            {openRefundRequests.map((refundRequest) => (
-              <div key={refundRequest.id} className="rounded-md border p-3">
-                <div className="flex items-start justify-between gap-3">
-                  <Link
-                    to={`/courses/${refundRequest.courseSlug}`}
-                    className="font-medium hover:underline"
-                  >
-                    {refundRequest.courseTitle}
-                  </Link>
-                  <span className="shrink-0 rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">
-                    Open
-                  </span>
-                </div>
-                <p className="mt-1 text-sm text-muted-foreground">
-                  {formatPrice(refundRequest.amountPaid)} · raised{" "}
-                  {new Date(refundRequest.requestedAt).toLocaleDateString()}
-                </p>
-                <p className="mt-2 text-sm">{refundRequest.reason}</p>
-              </div>
-            ))}
-            {declinedRefundRequests.map((refundRequest) => (
-              <div key={refundRequest.id} className="rounded-md border p-3">
-                <div className="flex items-start justify-between gap-3">
-                  <Link
-                    to={`/courses/${refundRequest.courseSlug}`}
-                    className="font-medium hover:underline"
-                  >
-                    {refundRequest.courseTitle}
-                  </Link>
-                  <span className="shrink-0 rounded-full bg-red-100 px-2.5 py-0.5 text-xs font-medium text-red-800 dark:bg-red-900/30 dark:text-red-300">
-                    Declined
-                  </span>
-                </div>
-                <p className="mt-1 text-sm text-muted-foreground">
-                  {formatPrice(refundRequest.amountPaid)}
-                  {refundRequest.resolvedAt &&
-                    ` · declined ${new Date(refundRequest.resolvedAt).toLocaleDateString()}`}
-                </p>
-                <p className="mt-2 text-sm">{refundRequest.reason}</p>
-                {refundRequest.declineNote && (
-                  <p className="mt-2 rounded-md bg-muted p-2 text-sm">
-                    <span className="font-medium">Note from our team:</span>{" "}
-                    {refundRequest.declineNote}
-                  </p>
-                )}
-              </div>
-            ))}
-            {approvedRefundRequests.map((refundRequest) => (
-              <div key={refundRequest.id} className="rounded-md border p-3">
-                <div className="flex items-start justify-between gap-3">
-                  <Link
-                    to={`/courses/${refundRequest.courseSlug}`}
-                    className="font-medium hover:underline"
-                  >
-                    {refundRequest.courseTitle}
-                  </Link>
-                  <span className="shrink-0 rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800 dark:bg-green-900/30 dark:text-green-300">
-                    Approved
-                  </span>
-                </div>
-                <p className="mt-1 text-sm text-muted-foreground">
-                  Refund of {formatPrice(refundRequest.amount)} ·{" "}
-                  {learnerRefundStatus(refundRequest.refundStatus)}
-                  {refundRequest.resolvedAt &&
-                    ` · approved ${new Date(refundRequest.resolvedAt).toLocaleDateString()}`}
-                </p>
-              </div>
+            {refundRequests.map((refundRequest) => (
+              <LearnerRefundRequest
+                key={refundRequest.id}
+                refundRequest={refundRequest}
+              />
             ))}
           </CardContent>
         </Card>
+      )}
+    </div>
+  );
+}
+
+const STATUS_PILLS: Record<
+  RefundRequestStatus,
+  { label: string; className: string }
+> = {
+  [RefundRequestStatus.Open]: {
+    label: "Open",
+    className:
+      "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300",
+  },
+  [RefundRequestStatus.Declined]: {
+    label: "Declined",
+    className: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300",
+  },
+  [RefundRequestStatus.Approved]: {
+    label: "Approved",
+    className:
+      "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300",
+  },
+};
+
+function LearnerRefundRequest({
+  refundRequest,
+}: {
+  refundRequest: LearnerRefundRequestRow;
+}) {
+  const pill = STATUS_PILLS[refundRequest.status];
+  const decidedOn =
+    refundRequest.resolvedAt &&
+    new Date(refundRequest.resolvedAt).toLocaleDateString();
+
+  return (
+    <div className="rounded-md border p-3">
+      <div className="flex items-start justify-between gap-3">
+        <Link
+          to={`/courses/${refundRequest.courseSlug}`}
+          className="font-medium hover:underline"
+        >
+          {refundRequest.courseTitle}
+        </Link>
+        <span
+          className={`shrink-0 rounded-full px-2.5 py-0.5 text-xs font-medium ${pill.className}`}
+        >
+          {pill.label}
+        </span>
+      </div>
+      <p className="mt-1 text-sm text-muted-foreground">
+        {refundRequest.status === RefundRequestStatus.Open && (
+          <>
+            {formatPrice(refundRequest.amountPaid)} · raised{" "}
+            {new Date(refundRequest.requestedAt).toLocaleDateString()}
+          </>
+        )}
+        {refundRequest.status === RefundRequestStatus.Declined && (
+          <>
+            {formatPrice(refundRequest.amountPaid)}
+            {decidedOn && ` · declined ${decidedOn}`}
+          </>
+        )}
+        {refundRequest.status === RefundRequestStatus.Approved && (
+          <>
+            Refund of{" "}
+            {formatPrice(refundRequest.refundAmount ?? refundRequest.amountPaid)}
+            {refundRequest.refundStatus &&
+              ` · ${learnerRefundStatus(refundRequest.refundStatus)}`}
+            {decidedOn && ` · approved ${decidedOn}`}
+          </>
+        )}
+      </p>
+      {refundRequest.status !== RefundRequestStatus.Approved && (
+        <p className="mt-2 text-sm">{refundRequest.reason}</p>
+      )}
+      {refundRequest.declineNote && (
+        <p className="mt-2 rounded-md bg-muted p-2 text-sm">
+          <span className="font-medium">Note from our team:</span>{" "}
+          {refundRequest.declineNote}
+        </p>
       )}
     </div>
   );

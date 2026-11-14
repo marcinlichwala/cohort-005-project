@@ -15,7 +15,7 @@ import { and, eq, isNotNull, sql } from "drizzle-orm";
 import { parseFormData, parseParams } from "~/lib/validation";
 import { formatPrice } from "~/lib/utils";
 import { getSecondsWatchedInCourse } from "~/lib/watch-time.server";
-import { findOpenRefundRequest } from "~/lib/refunds.server";
+import { findRefundRequestBlockingNewRequest } from "~/lib/refunds.server";
 
 const REFUND_WINDOW_DAYS = 14;
 const MAX_WATCHED_HOURS = 2;
@@ -115,7 +115,15 @@ export async function action({ params, request }: Route.ActionArgs) {
     throw data("You have not bought this course.", { status: 403 });
   }
 
-  if (findOpenRefundRequest(purchase.id)) {
+  const blockingRequest = findRefundRequestBlockingNewRequest(purchase.id);
+
+  if (blockingRequest?.status === RefundRequestStatus.Approved) {
+    throw data("This purchase has already been approved for a refund.", {
+      status: 409,
+    });
+  }
+
+  if (blockingRequest) {
     throw data("You already have an open refund request on this purchase.", {
       status: 409,
     });
