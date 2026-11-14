@@ -27,6 +27,8 @@ vi.mock("~/db", () => ({
 
 import {
   approveRefundRequest,
+  declineRefundRequest,
+  findOpenRefundRequest,
   listOpenRefundRequests,
   listRefundRequests,
   RefundRuleError,
@@ -43,14 +45,6 @@ function daysBeforeNow(days: number) {
 // decline, mark issued, mark failed) reuse these.
 
 type Base = ReturnType<typeof seedBaseData>;
-
-function addAdmin(name = "Alex Admin") {
-  return testDb
-    .insert(users)
-    .values({ name, email: `${name.toLowerCase().replace(/\s+/g, ".")}@example.com`, role: UserRole.Admin })
-    .returning()
-    .get();
-}
 
 function addLearner(name: string, email: string) {
   return testDb
@@ -92,6 +86,18 @@ function addRefundRequest(input: {
       reason: input.reason ?? "The course was not what I expected.",
       status: input.status ?? RefundRequestStatus.Open,
       requestedAt: daysBeforeNow(input.requestedDaysAgo),
+    })
+    .returning()
+    .get();
+}
+
+function addAdmin(name = "Alex Admin") {
+  return testDb
+    .insert(users)
+    .values({
+      name,
+      email: `${name.toLowerCase().replace(/\s+/g, ".")}@example.com`,
+      role: UserRole.Admin,
     })
     .returning()
     .get();
@@ -294,9 +300,142 @@ describe("refund module for admins", () => {
       expect(listOpenRefundRequests()).toEqual([]);
     });
   });
+
+  // ─── Listing for the admin screen ───
+
+  describe("listRefundRequests", () => {
+    it("returns Open requests and decided requests as separate collections, most recently decided first", () => {
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      const admin = addAdmin();
+      const open = addOpenRequest(base, { name: "Owen Open", requestedDaysAgo: 5 });
+      const declinedEarlier = addOpenRequest(base, { name: "Dana Early", requestedDaysAgo: 4 });
+      const declinedLater = addOpenRequest(base, { name: "Dina Late", requestedDaysAgo: 3 });
+      declineRefundRequest(declinedEarlier.request.id, admin.id);
+      vi.setSystemTime(new Date(NOW.getTime() + 60_000));
+      declineRefundRequest(declinedLater.request.id, admin.id);
+
+      const { open: openRows, decided } = listRefundRequests();
+
+      expect(openRows.map((row) => row.id)).toEqual([open.request.id]);
+      expect(decided.map((row) => row.id)).toEqual([
+        declinedLater.request.id,
+        declinedEarlier.request.id,
+      ]);
+    });
+  });
+
+  // ─── Declining a Refund Request ───
+
+  describe("declineRefundRequest", () => {
+    // The decline email goes to the console log; keep test output quiet.
+    beforeEach(() => {
+      vi.spyOn(console, "log").mockImplementation(() => {});
+    });
+
+    it("moves a declined request out of Open and into the history, with the admin, the time and the Decline Note", () => {
+      const admin = addAdmin();
+      const { request } = addOpenRequest(base, { name: "Liam Learner", requestedDaysAgo: 3 });
+
+      declineRefundRequest(request.id, admin.id, "You have watched most of the course.");
+
+      const { open, decided } = listRefundRequests();
+      expect(open).toEqual([]);
+      expect(decided).toHaveLength(1);
+      expect(decided[0]).toMatchObject({
+        id: request.id,
+        status: RefundRequestStatus.Declined,
+        declineNote: "You have watched most of the course.",
+        resolvedAt: NOW.toISOString(),
+        resolvedByName: "Alex Admin",
+        learnerName: "Liam Learner",
+      });
+    });
+
+    it("builds a decline email to the learner that includes the Decline Note", () => {
+      const admin = addAdmin();
+      const { request } = addOpenRequest(base, { name: "Liam Learner", requestedDaysAgo: 3 });
+
+      const { email } = declineRefundRequest(
+        request.id,
+        admin.id,
+        "You have watched most of the course."
+      );
+
+      expect(email.to).toBe("liam.learner@example.com");
+      expect(email.subject).toBe("Refund request declined — Test Course");
+      expect(email.body).toContain("Hi Liam Learner,");
+      expect(email.body).toContain("You have watched most of the course.");
+    });
+
+    it("declines without a note: nothing is stored and the email has no note section", () => {
+      const admin = addAdmin();
+      const { request } = addOpenRequest(base, { name: "Liam Learner", requestedDaysAgo: 3 });
+
+      const { email } = declineRefundRequest(request.id, admin.id);
+
+      const [row] = listRefundRequests().decided;
+      expect(row.status).toBe(RefundRequestStatus.Declined);
+      expect(row.declineNote).toBeNull();
+      expect(email.body).not.toContain("A note from our team");
+    });
+
+    it("treats a blank note as no note, so the learner isn't shown an empty one", () => {
+      const admin = addAdmin();
+      const { request } = addOpenRequest(base, { name: "Liam Learner", requestedDaysAgo: 3 });
+
+      const { email } = declineRefundRequest(request.id, admin.id, "   ");
+
+      expect(listRefundRequests().decided[0].declineNote).toBeNull();
+      expect(email.body).not.toContain("A note from our team");
+    });
+
+    it("rejects declining a request that has already been decided, and leaves it as it was", () => {
+      // Two admins on the same screen: the second one must get a clear
+      // message, not silently overwrite the first decision.
+      const admin = addAdmin();
+      const { request } = addOpenRequest(base, { name: "Liam Learner", requestedDaysAgo: 3 });
+      declineRefundRequest(request.id, admin.id, "First decision.");
+
+      expect(() => declineRefundRequest(request.id, admin.id, "Second decision.")).toThrow(
+        "This Refund Request has already been declined, so it can't be declined."
+      );
+      expect(listRefundRequests().decided[0].declineNote).toBe("First decision.");
+    });
+
+    it("rejects declining an Approved Refund Request", () => {
+      const admin = addAdmin();
+      const { purchase } = addOpenRequest(base, { name: "Ada Approved", requestedDaysAgo: 3 });
+      const approved = addRefundRequest({
+        purchaseId: purchase.id,
+        requestedDaysAgo: 2,
+        status: RefundRequestStatus.Approved,
+      });
+
+      expect(() => declineRefundRequest(approved.id, admin.id)).toThrow(
+        "This Refund Request has already been approved, so it can't be declined."
+      );
+    });
+
+    it("lets the learner raise a new Refund Request for the same purchase after a decline", () => {
+      const admin = addAdmin();
+      const { request, purchase } = addOpenRequest(base, { name: "Liam Learner", requestedDaysAgo: 3 });
+      expect(findOpenRefundRequest(purchase.id)?.id).toBe(request.id);
+
+      declineRefundRequest(request.id, admin.id);
+
+      // The request route refuses a new request only while one is Open.
+      expect(findOpenRefundRequest(purchase.id)).toBeUndefined();
+    });
+  });
+
   // ─── Approving ───
 
   describe("approveRefundRequest", () => {
+    // The approval email goes to the console log; keep test output quiet.
+    beforeEach(() => {
+      vi.spyOn(console, "log").mockImplementation(() => {});
+    });
+
     it("turns an Open Refund Request into an Approved one with a Pending Refund for the full amount paid", () => {
       const admin = addAdmin();
       const { request } = addOpenRequest(base, {
@@ -325,8 +464,8 @@ describe("refund module for admins", () => {
 
       const [row] = listRefundRequests().decided;
       expect(row).toMatchObject({
-        decidedAt: NOW.toISOString(),
-        decidedByName: "Alex Rivera",
+        resolvedAt: NOW.toISOString(),
+        resolvedByName: "Alex Rivera",
       });
     });
     it("approves even when the learner is now past the 14-day window and over 2 hours watched (ADR 0001)", () => {
@@ -359,12 +498,12 @@ describe("refund module for admins", () => {
       approveRefundRequest(request.id, first.id);
 
       expect(() => approveRefundRequest(request.id, second.id)).toThrow(
-        new RefundRuleError("This Refund Request has already been approved.")
+        new RefundRuleError("This Refund Request has already been approved, so it can't be approved.")
       );
 
       const { decided } = listRefundRequests();
       expect(decided).toHaveLength(1);
-      expect(decided[0].decidedByName).toBe("First Admin");
+      expect(decided[0].resolvedByName).toBe("First Admin");
     });
 
     it("rejects approving a Declined Refund Request", () => {
@@ -383,7 +522,7 @@ describe("refund module for admins", () => {
       });
 
       expect(() => approveRefundRequest(request.id, admin.id)).toThrow(
-        new RefundRuleError("This Refund Request has already been declined.")
+        new RefundRuleError("This Refund Request has already been declined, so it can't be approved.")
       );
 
       const [row] = listRefundRequests().decided;

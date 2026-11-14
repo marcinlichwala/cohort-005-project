@@ -1,23 +1,24 @@
-import { useEffect, useState } from "react";
-import { AlertTriangle, History, ReceiptText } from "lucide-react";
-import { data, isRouteErrorResponse, Link, useFetcher } from "react-router";
-import { toast } from "sonner";
+import { AlertTriangle, ReceiptText } from "lucide-react";
+import { data, isRouteErrorResponse, Link } from "react-router";
 import { z } from "zod";
 import type { Route } from "./+types/admin.refunds";
-import { RefundRequestStatus, RefundStatus } from "~/db/schema";
 import { requirePlatformAdmin } from "~/lib/access.server";
 import {
   approveRefundRequest,
+  declineRefundRequest,
   listRefundRequests,
   RefundRuleError,
   type DecidedRefundRequestRow,
   type OpenRefundRequestRow,
 } from "~/lib/refunds.server";
-import { parseFormData } from "~/lib/validation";
+import { RefundRequestStatus, RefundStatus } from "~/db/schema";
 import { formatPrice } from "~/lib/utils";
+import { parseFormData } from "~/lib/validation";
+import { ConfirmAction } from "~/components/confirm-action";
 import { Card, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
-import { ConfirmDialog } from "~/components/confirm-dialog";
+import { Label } from "~/components/ui/label";
+import { Textarea } from "~/components/ui/textarea";
 
 // Admin-only: the loader and every action call requirePlatformAdmin first.
 // All refund logic lives in ~/lib/refunds.server; this route only parses
@@ -30,12 +31,24 @@ export function meta() {
   ];
 }
 
-// One member per admin decision. Later tickets add decline, mark-issued and
-// mark-failed alongside approve.
+const DECLINE_NOTE_MAX_LENGTH = 1000;
+
 const refundActionSchema = z.discriminatedUnion("intent", [
   z.object({
     intent: z.literal("approve"),
-    refundRequestId: z.coerce.number().int().positive(),
+    refundRequestId: z.coerce.number().int(),
+  }),
+  z.object({
+    intent: z.literal("decline"),
+    refundRequestId: z.coerce.number().int(),
+    declineNote: z
+      .string()
+      .trim()
+      .max(
+        DECLINE_NOTE_MAX_LENGTH,
+        `Please keep the Decline Note under ${DECLINE_NOTE_MAX_LENGTH} characters.`
+      )
+      .optional(),
   }),
 ]);
 
@@ -49,20 +62,24 @@ export async function loader({ request }: Route.LoaderArgs) {
 export async function action({ request }: Route.ActionArgs) {
   const { userId } = await requirePlatformAdmin(request);
 
-  const formData = await request.formData();
-  const parsed = parseFormData(formData, refundActionSchema);
-
+  const parsed = parseFormData(await request.formData(), refundActionSchema);
   if (!parsed.success) {
-    throw data(Object.values(parsed.errors)[0] ?? "Invalid input.", {
-      status: 400,
-    });
+    const message = Object.values(parsed.errors)[0] ?? "Invalid request.";
+    throw data(message, { status: 400 });
   }
 
   try {
     switch (parsed.data.intent) {
       case "approve":
         approveRefundRequest(parsed.data.refundRequestId, userId);
-        return { success: true, message: "Refund Request approved." };
+        return { success: true };
+      case "decline":
+        declineRefundRequest(
+          parsed.data.refundRequestId,
+          userId,
+          parsed.data.declineNote
+        );
+        return { success: true };
     }
   } catch (error) {
     if (error instanceof RefundRuleError) {
@@ -93,8 +110,7 @@ export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
       </div>
 
       <OpenRefundRequestsSection requests={openRequests} />
-
-      <RefundHistorySection requests={decidedRequests} />
+      <DecidedRefundRequestsSection requests={decidedRequests} />
     </div>
   );
 }
@@ -141,7 +157,7 @@ function OpenRefundRequestsSection({
                     <HeaderCell>Since purchase</HeaderCell>
                     <HeaderCell>Watched</HeaderCell>
                     <HeaderCell>Reason</HeaderCell>
-                    <HeaderCell>Decision</HeaderCell>
+                    <HeaderCell>Decide</HeaderCell>
                   </tr>
                 </thead>
                 <tbody>
@@ -194,75 +210,78 @@ function OpenRefundRequestRowView({
       </td>
       <td className="px-4 py-3 text-sm">
         <div className="flex flex-wrap gap-2">
-          <ApproveButton request={request} />
+          <ApproveRefundRequest request={request} />
+          <DeclineRefundRequest request={request} />
         </div>
       </td>
     </tr>
   );
 }
 
-// ─── Decisions ───
-
-function ApproveButton({ request }: { request: OpenRefundRequestRow }) {
-  const fetcher = useFetcher<typeof action>();
-  const [confirming, setConfirming] = useState(false);
-  const pending = fetcher.state !== "idle";
-
-  useEffect(() => {
-    if (fetcher.state === "idle" && fetcher.data?.success) {
-      toast.success(fetcher.data.message);
-      setConfirming(false);
-    }
-  }, [fetcher.state, fetcher.data]);
-
+function ApproveRefundRequest({ request }: { request: OpenRefundRequestRow }) {
+  // No eligibility warning here on purpose: the admin may approve past the
+  // window or the watch limit (ADR 0001). The facts are in the row.
   return (
-    <>
-      <Button size="sm" onClick={() => setConfirming(true)}>
-        Approve
-      </Button>
-      <ConfirmDialog
-        open={confirming}
-        title="Approve this Refund Request?"
-        description={
-          <>
-            {request.learnerName} will get a Pending Refund of{" "}
-            <strong>{formatPrice(request.amountPaid)}</strong>, the full
-            amount paid for {request.courseTitle}, and an approval email. You
-            can't undo this.
-          </>
-        }
-        confirmLabel="Approve"
-        pendingLabel="Approving…"
-        pending={pending}
-        onCancel={() => setConfirming(false)}
-        onConfirm={() =>
-          fetcher.submit(
-            { intent: "approve", refundRequestId: String(request.id) },
-            { method: "post" }
-          )
-        }
-      />
-    </>
+    <ConfirmAction
+      triggerLabel="Approve"
+      title="Approve this Refund Request?"
+      description={
+        <>
+          {request.learnerName} will get a Pending Refund of{" "}
+          <strong>{formatPrice(request.amountPaid)}</strong>, the full amount
+          paid for {request.courseTitle}, and an approval email. You can't
+          undo this.
+        </>
+      }
+      confirmLabel="Approve request"
+      fields={{ intent: "approve", refundRequestId: String(request.id) }}
+    />
   );
 }
 
-// ─── History ───
+function DeclineRefundRequest({ request }: { request: OpenRefundRequestRow }) {
+  const noteId = `decline-note-${request.id}`;
+  return (
+    <ConfirmAction
+      triggerLabel="Decline"
+      variant="destructive"
+      title="Decline this Refund Request?"
+      description={
+        <>
+          {request.learnerName} will get an email saying their request for{" "}
+          {request.courseTitle} ({formatPrice(request.amountPaid)}) was
+          declined. They can raise a new one later.
+        </>
+      }
+      confirmLabel="Decline request"
+      fields={{ intent: "decline", refundRequestId: String(request.id) }}
+    >
+      <div className="space-y-2">
+        <Label htmlFor={noteId}>Decline Note (optional)</Label>
+        <Textarea
+          id={noteId}
+          name="declineNote"
+          maxLength={DECLINE_NOTE_MAX_LENGTH}
+          placeholder="Tell the learner why. This goes in the email."
+        />
+      </div>
+    </ConfirmAction>
+  );
+}
 
-function RefundHistorySection({
+// ─── History: decided Refund Requests ───
+
+function DecidedRefundRequestsSection({
   requests,
 }: {
   requests: DecidedRefundRequestRow[];
 }) {
   return (
     <section className="mt-12">
-      <div className="mb-4 flex items-center gap-2">
-        <History className="size-4 text-muted-foreground" />
-        <h2 className="text-xl font-semibold">History</h2>
-      </div>
-
+      <h2 className="mb-4 text-xl font-semibold">History</h2>
       {requests.length === 0 ? (
         <Card>
-          <CardContent className="py-8 text-center text-sm text-muted-foreground">
+          <CardContent className="py-8 text-center text-muted-foreground">
             No decided Refund Requests yet.
           </CardContent>
         </Card>
@@ -279,6 +298,7 @@ function RefundHistorySection({
                     <HeaderCell>Decision</HeaderCell>
                     <HeaderCell>Decided</HeaderCell>
                     <HeaderCell>Refund</HeaderCell>
+                    <HeaderCell>Reason</HeaderCell>
                   </tr>
                 </thead>
                 <tbody>
@@ -312,72 +332,75 @@ function DecidedRefundRequestRowView({
       <td className="px-4 py-3 text-sm">{request.courseTitle}</td>
       <td className="px-4 py-3 text-sm">{formatPrice(request.amountPaid)}</td>
       <td className="px-4 py-3 text-sm">
-        <RefundRequestStatusBadge status={request.status} />
+        <DecisionPill status={request.status} />
+        {request.status === RefundRequestStatus.Declined && (
+          <p className="mt-2 max-w-xs whitespace-pre-wrap text-muted-foreground">
+            {request.declineNote ? (
+              <>Note: {request.declineNote}</>
+            ) : (
+              <span className="italic">No Decline Note</span>
+            )}
+          </p>
+        )}
       </td>
       <td className="px-4 py-3 text-sm text-muted-foreground">
-        {request.decidedAt
-          ? new Date(request.decidedAt).toLocaleDateString()
+        {request.resolvedAt
+          ? new Date(request.resolvedAt).toLocaleDateString()
           : "—"}
-        {request.decidedByName ? ` by ${request.decidedByName}` : ""}
+        {request.resolvedByName && <div>by {request.resolvedByName}</div>}
       </td>
       <td className="px-4 py-3 text-sm">
         {request.refundStatus ? (
-          <RefundStatusBadge status={request.refundStatus} />
+          <RefundStatusPill status={request.refundStatus} />
         ) : (
           <span className="text-muted-foreground">—</span>
         )}
+      </td>
+      <td className="max-w-md whitespace-pre-wrap px-4 py-3 text-sm">
+        {request.reason}
       </td>
     </tr>
   );
 }
 
-const badgeClass =
-  "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium";
-
-function RefundRequestStatusBadge({ status }: { status: RefundRequestStatus }) {
-  switch (status) {
-    case RefundRequestStatus.Approved:
-      return (
-        <span className={`${badgeClass} bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300`}>
-          Approved
-        </span>
-      );
-    case RefundRequestStatus.Declined:
-      return (
-        <span className={`${badgeClass} bg-muted text-muted-foreground`}>
-          Declined
-        </span>
-      );
-    case RefundRequestStatus.Open:
-      return (
-        <span className={`${badgeClass} bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300`}>
-          Open
-        </span>
-      );
-  }
+function DecisionPill({ status }: { status: RefundRequestStatus }) {
+  const declined = status === RefundRequestStatus.Declined;
+  return (
+    <span
+      className={
+        declined
+          ? "rounded-full bg-red-100 px-2.5 py-0.5 text-xs font-medium text-red-800 dark:bg-red-900/30 dark:text-red-300"
+          : "rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800 dark:bg-green-900/30 dark:text-green-300"
+      }
+    >
+      {declined ? "Declined" : "Approved"}
+    </span>
+  );
 }
 
-function RefundStatusBadge({ status }: { status: RefundStatus }) {
-  switch (status) {
-    case RefundStatus.Pending:
-      return (
-        <span className={`${badgeClass} bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300`}>
-          Pending
-        </span>
-      );
-    case RefundStatus.Issued:
-      return (
-        <span className={`${badgeClass} bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300`}>
-          Issued
-        </span>
-      );
-    case RefundStatus.Failed:
-      return (
-        <span className={`${badgeClass} bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300`}>
-          Failed
-        </span>
-      );
-  }
+function RefundStatusPill({ status }: { status: RefundStatus }) {
+  const styles: Record<RefundStatus, { label: string; className: string }> = {
+    [RefundStatus.Pending]: {
+      label: "Pending",
+      className:
+        "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300",
+    },
+    [RefundStatus.Issued]: {
+      label: "Issued",
+      className:
+        "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300",
+    },
+    [RefundStatus.Failed]: {
+      label: "Failed",
+      className: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300",
+    },
+  };
+  const { label, className } = styles[status];
+  return (
+    <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${className}`}>
+      {label}
+    </span>
+  );
 }
 
 function formatHours(hours: number) {

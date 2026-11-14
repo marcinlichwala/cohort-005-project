@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { eq, gte, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
+import { and, eq, gte, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import type { SQLiteTable } from "drizzle-orm/sqlite-core";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
@@ -78,7 +78,7 @@ async function seed() {
     DROP TABLE IF EXISTS coupons;
     DROP TABLE IF EXISTS team_members;
     DROP TABLE IF EXISTS teams;
-    -- Before migration 0011 this name held the Refund Requests; since 0012
+    -- Before migration 0011 this name held the Refund Requests; since 0013
     -- it holds the Refunds, which point at refund_requests, so it drops first.
     DROP TABLE IF EXISTS refunds;
     DROP TABLE IF EXISTS refund_requests;
@@ -2787,6 +2787,52 @@ This course is still in draft while the cluster examples are rewritten against t
 
   console.log("Created Liam's Refund Request.");
 
+  // ─── Sophia's Declined Refund Request ───
+  // A Declined Refund Request with a Decline Note, so the history section
+  // and the learner's settings page have one to show. She keeps the course.
+
+  const sophia = studentByEmail("sophia.davis@student.dev");
+  const [sophiaPurchase] = db
+    .insert(schema.purchases)
+    .values({
+      userId: sophia.id,
+      courseId: course2.id,
+      amountPaid: 4900,
+      country: null,
+      createdAt: daysAgo(12),
+    })
+    .returning()
+    .all();
+  const sophiaEnrolled = db
+    .select({ id: schema.enrollments.id })
+    .from(schema.enrollments)
+    .where(
+      and(
+        eq(schema.enrollments.userId, sophia.id),
+        eq(schema.enrollments.courseId, course2.id)
+      )
+    )
+    .get();
+  if (!sophiaEnrolled) {
+    db.insert(schema.enrollments)
+      .values({ userId: sophia.id, courseId: course2.id, enrolledAt: daysAgo(12) })
+      .run();
+  }
+  db.insert(schema.refundRequests)
+    .values({
+      purchaseId: sophiaPurchase.id,
+      status: RefundRequestStatus.Declined,
+      reason: "I didn't have time to start it this month.",
+      requestedAt: daysAgo(10),
+      resolvedAt: daysAgo(8),
+      resolvedByUserId: admin.id,
+      declineNote:
+        "The course stays yours with no deadline, so there is no need to refund it. Start whenever suits you.",
+    })
+    .run();
+
+  console.log("Created Sophia's Declined Refund Request.");
+
   // ─── Noah's Approved Refund Request ───
   // A learner whose Refund Request Alex approved, so the Refund is Pending:
   // the money hasn't been confirmed as sent, so Noah keeps his enrollment.
@@ -2893,7 +2939,7 @@ This course is still in draft while the cluster examples are rewritten against t
     `  Purchases: ${countRows(schema.purchases)} (${countRows(schema.purchases, gte(schema.purchases.createdAt, sevenDaysAgo))} in the last 7 days), spanning ${historyDays} days`
   );
   console.log(
-    `  Refund Requests: ${countRows(schema.refundRequests)} (${countRows(schema.refundRequests, eq(schema.refundRequests.status, RefundRequestStatus.Open))} open, ${countRows(schema.refundRequests, eq(schema.refundRequests.status, RefundRequestStatus.Approved))} approved), refunds: ${countRows(schema.refunds)} (${countRows(schema.refunds, eq(schema.refunds.status, RefundStatus.Pending))} pending)`
+    `  Refund Requests: ${countRows(schema.refundRequests)} (${countRows(schema.refundRequests, eq(schema.refundRequests.status, RefundRequestStatus.Open))} open, ${countRows(schema.refundRequests, eq(schema.refundRequests.status, RefundRequestStatus.Declined))} declined, ${countRows(schema.refundRequests, eq(schema.refundRequests.status, RefundRequestStatus.Approved))} approved), refunds: ${countRows(schema.refunds)} (${countRows(schema.refunds, eq(schema.refunds.status, RefundStatus.Pending))} pending)`
   );
   console.log(
     `  Teams: ${countRows(schema.teams)}, coupons: ${countRows(schema.coupons)} (${countRows(schema.coupons, isNotNull(schema.coupons.redeemedByUserId))} redeemed)`

@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "8b6a4040-311c-4d9d-9b0a-bf731eabced8",
+  "id": "0678317d-9bae-4492-9255-f95b18d02669",
   "prevId": "c9661212-0409-4806-a25f-992d83669af1",
   "tables": {
     "categories": {
@@ -1270,6 +1270,13 @@
           "notNull": true,
           "autoincrement": false
         },
+        "amount_refunded": {
+          "name": "amount_refunded",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "requested_at": {
           "name": "requested_at",
           "type": "text",
@@ -1287,6 +1294,13 @@
         "resolved_by_user_id": {
           "name": "resolved_by_user_id",
           "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "decline_note": {
+          "name": "decline_note",
+          "type": "text",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
@@ -1321,101 +1335,6 @@
           "tableTo": "users",
           "columnsFrom": [
             "resolved_by_user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
-    "refunds": {
-      "name": "refunds",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "integer",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": true
-        },
-        "refund_request_id": {
-          "name": "refund_request_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "amount": {
-          "name": "amount",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "'pending'"
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "status_changed_at": {
-          "name": "status_changed_at",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "status_changed_by_user_id": {
-          "name": "status_changed_by_user_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        }
-      },
-      "indexes": {
-        "refunds_refund_request_id_unique": {
-          "name": "refunds_refund_request_id_unique",
-          "columns": [
-            "refund_request_id"
-          ],
-          "isUnique": true
-        }
-      },
-      "foreignKeys": {
-        "refunds_refund_request_id_refund_requests_id_fk": {
-          "name": "refunds_refund_request_id_refund_requests_id_fk",
-          "tableFrom": "refunds",
-          "tableTo": "refund_requests",
-          "columnsFrom": [
-            "refund_request_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "refunds_status_changed_by_user_id_users_id_fk": {
-          "name": "refunds_status_changed_by_user_id_users_id_fk",
-          "tableFrom": "refunds",
-          "tableTo": "users",
-          "columnsFrom": [
-            "status_changed_by_user_id"
           ],
           "columnsTo": [
             "id"

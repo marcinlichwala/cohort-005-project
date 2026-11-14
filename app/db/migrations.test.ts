@@ -78,7 +78,7 @@ describe("Refund Request table rename", () => {
 });
 
 // The last migration before Refunds got their own table.
-const BEFORE_REFUNDS = "0011_rename_refunds_to_refund_requests";
+const BEFORE_REFUNDS = "0012_add_decline_note_to_refund_requests";
 
 describe("Refunds table backfill", () => {
   it("gives every existing Approved Refund Request a Pending Refund for the amount paid", () => {

@@ -77,6 +77,28 @@ export async function loader({ request }: Route.LoaderArgs) {
     )
     .all();
 
+  const declinedRefundRequests = db
+    .select({
+      id: refundRequests.id,
+      courseTitle: courses.title,
+      courseSlug: courses.slug,
+      amountPaid: purchases.amountPaid,
+      reason: refundRequests.reason,
+      declineNote: refundRequests.declineNote,
+      resolvedAt: refundRequests.resolvedAt,
+    })
+    .from(refundRequests)
+    .innerJoin(purchases, eq(refundRequests.purchaseId, purchases.id))
+    .innerJoin(courses, eq(purchases.courseId, courses.id))
+    .where(
+      and(
+        eq(purchases.userId, currentUserId),
+        eq(refundRequests.status, RefundRequestStatus.Declined)
+      )
+    )
+    .orderBy(desc(refundRequests.resolvedAt))
+    .all();
+
   const approvedRefundRequests = db
     .select({
       id: refundRequests.id,
@@ -84,7 +106,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       courseSlug: courses.slug,
       amount: refunds.amount,
       refundStatus: refunds.status,
-      decidedAt: refundRequests.resolvedAt,
+      resolvedAt: refundRequests.resolvedAt,
     })
     .from(refundRequests)
     .innerJoin(purchases, eq(refundRequests.purchaseId, purchases.id))
@@ -108,6 +130,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       role: currentUser.role,
     },
     openRefundRequests,
+    declinedRefundRequests,
     approvedRefundRequests,
   };
 }
@@ -147,7 +170,12 @@ export async function action({ request }: Route.ActionArgs) {
 }
 
 export default function Settings({ loaderData }: Route.ComponentProps) {
-  const { user, openRefundRequests, approvedRefundRequests } = loaderData;
+  const {
+    user,
+    openRefundRequests,
+    declinedRefundRequests,
+    approvedRefundRequests,
+  } = loaderData;
   const fetcher = useFetcher();
   const nameInputRef = useRef<HTMLInputElement>(null);
 
@@ -234,18 +262,20 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
         </CardContent>
       </Card>
 
-      {(openRefundRequests.length > 0 ||
-        approvedRefundRequests.length > 0) && (
+      {openRefundRequests.length +
+        declinedRefundRequests.length +
+        approvedRefundRequests.length >
+        0 && (
         <Card className="mt-8 max-w-md">
           <CardHeader>
             <h2 className="text-lg font-semibold">Refund Requests</h2>
-            <p className="text-sm text-muted-foreground">
-              {openRefundRequests.length === 0
-                ? "Your refund requests and where they stand."
-                : openRefundRequests.length === 1
+            {openRefundRequests.length > 0 && (
+              <p className="text-sm text-muted-foreground">
+                {openRefundRequests.length === 1
                   ? "One refund request is waiting on us."
                   : `${openRefundRequests.length} refund requests are waiting on us.`}
-            </p>
+              </p>
+            )}
           </CardHeader>
           <CardContent className="space-y-4">
             {openRefundRequests.map((refundRequest) => (
@@ -268,6 +298,33 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
                 <p className="mt-2 text-sm">{refundRequest.reason}</p>
               </div>
             ))}
+            {declinedRefundRequests.map((refundRequest) => (
+              <div key={refundRequest.id} className="rounded-md border p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <Link
+                    to={`/courses/${refundRequest.courseSlug}`}
+                    className="font-medium hover:underline"
+                  >
+                    {refundRequest.courseTitle}
+                  </Link>
+                  <span className="shrink-0 rounded-full bg-red-100 px-2.5 py-0.5 text-xs font-medium text-red-800 dark:bg-red-900/30 dark:text-red-300">
+                    Declined
+                  </span>
+                </div>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {formatPrice(refundRequest.amountPaid)}
+                  {refundRequest.resolvedAt &&
+                    ` · declined ${new Date(refundRequest.resolvedAt).toLocaleDateString()}`}
+                </p>
+                <p className="mt-2 text-sm">{refundRequest.reason}</p>
+                {refundRequest.declineNote && (
+                  <p className="mt-2 rounded-md bg-muted p-2 text-sm">
+                    <span className="font-medium">Note from our team:</span>{" "}
+                    {refundRequest.declineNote}
+                  </p>
+                )}
+              </div>
+            ))}
             {approvedRefundRequests.map((refundRequest) => (
               <div key={refundRequest.id} className="rounded-md border p-3">
                 <div className="flex items-start justify-between gap-3">
@@ -284,9 +341,8 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
                 <p className="mt-1 text-sm text-muted-foreground">
                   Refund of {formatPrice(refundRequest.amount)} ·{" "}
                   {learnerRefundStatus(refundRequest.refundStatus)}
-                  {refundRequest.decidedAt
-                    ? ` · approved ${new Date(refundRequest.decidedAt).toLocaleDateString()}`
-                    : ""}
+                  {refundRequest.resolvedAt &&
+                    ` · approved ${new Date(refundRequest.resolvedAt).toLocaleDateString()}`}
                 </p>
               </div>
             ))}
@@ -297,7 +353,7 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
   );
 }
 
-// A Failed Refund is still owed, and the team is retrying, so the learner
+// A Failed Refund is still owed and the team is retrying, so the learner
 // sees it as "processing" rather than a failure they need to act on.
 function learnerRefundStatus(status: RefundStatus) {
   switch (status) {
