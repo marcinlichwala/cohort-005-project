@@ -1,14 +1,23 @@
 import { AlertTriangle, ReceiptText } from "lucide-react";
-import { isRouteErrorResponse, Link } from "react-router";
+import { data, isRouteErrorResponse, Link } from "react-router";
+import { z } from "zod";
 import type { Route } from "./+types/admin.refunds";
 import { requirePlatformAdmin } from "~/lib/access.server";
 import {
-  listOpenRefundRequests,
+  declineRefundRequest,
+  listRefundRequests,
+  RefundRuleError,
+  type DecidedRefundRequestRow,
   type OpenRefundRequestRow,
 } from "~/lib/refunds.server";
+import { RefundRequestStatus } from "~/db/schema";
 import { formatPrice } from "~/lib/utils";
+import { parseFormData } from "~/lib/validation";
+import { ConfirmAction } from "~/components/confirm-action";
 import { Card, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
+import { Label } from "~/components/ui/label";
+import { Textarea } from "~/components/ui/textarea";
 
 // Admin-only: the loader and every action call requirePlatformAdmin first.
 // All refund logic lives in ~/lib/refunds.server; this route only parses
@@ -21,14 +30,59 @@ export function meta() {
   ];
 }
 
+const DECLINE_NOTE_MAX_LENGTH = 1000;
+
+const refundActionSchema = z.discriminatedUnion("intent", [
+  z.object({
+    intent: z.literal("decline"),
+    refundRequestId: z.coerce.number().int(),
+    declineNote: z
+      .string()
+      .trim()
+      .max(
+        DECLINE_NOTE_MAX_LENGTH,
+        `Please keep the Decline Note under ${DECLINE_NOTE_MAX_LENGTH} characters.`
+      )
+      .optional(),
+  }),
+]);
+
 export async function loader({ request }: Route.LoaderArgs) {
   await requirePlatformAdmin(request);
 
-  return { openRequests: listOpenRefundRequests() };
+  const { open, decided } = listRefundRequests();
+  return { openRequests: open, decidedRequests: decided };
+}
+
+export async function action({ request }: Route.ActionArgs) {
+  const { userId } = await requirePlatformAdmin(request);
+
+  const parsed = parseFormData(await request.formData(), refundActionSchema);
+  if (!parsed.success) {
+    const message = Object.values(parsed.errors)[0] ?? "Invalid request.";
+    throw data(message, { status: 400 });
+  }
+
+  try {
+    switch (parsed.data.intent) {
+      case "decline":
+        declineRefundRequest(
+          parsed.data.refundRequestId,
+          userId,
+          parsed.data.declineNote
+        );
+        return { success: true };
+    }
+  } catch (error) {
+    if (error instanceof RefundRuleError) {
+      throw data(error.message, { status: 409 });
+    }
+    throw error;
+  }
 }
 
 export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
-  const { openRequests } = loaderData;
+  const { openRequests, decidedRequests } = loaderData;
 
   return (
     <div className="mx-auto max-w-7xl p-6 lg:p-8">
@@ -48,6 +102,7 @@ export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
       </div>
 
       <OpenRefundRequestsSection requests={openRequests} />
+      <DecidedRefundRequestsSection requests={decidedRequests} />
     </div>
   );
 }
@@ -94,6 +149,7 @@ function OpenRefundRequestsSection({
                     <HeaderCell>Since purchase</HeaderCell>
                     <HeaderCell>Watched</HeaderCell>
                     <HeaderCell>Reason</HeaderCell>
+                    <HeaderCell>Decide</HeaderCell>
                   </tr>
                 </thead>
                 <tbody>
@@ -144,7 +200,141 @@ function OpenRefundRequestRowView({
       <td className="max-w-md whitespace-pre-wrap px-4 py-3 text-sm">
         {request.reason}
       </td>
+      <td className="px-4 py-3 text-sm">
+        <DeclineRefundRequest request={request} />
+      </td>
     </tr>
+  );
+}
+
+function DeclineRefundRequest({ request }: { request: OpenRefundRequestRow }) {
+  const noteId = `decline-note-${request.id}`;
+  return (
+    <ConfirmAction
+      triggerLabel="Decline"
+      variant="destructive"
+      title="Decline this Refund Request?"
+      description={
+        <>
+          {request.learnerName} will get an email saying their request for{" "}
+          {request.courseTitle} ({formatPrice(request.amountPaid)}) was
+          declined. They can raise a new one later.
+        </>
+      }
+      confirmLabel="Decline request"
+      fields={{ intent: "decline", refundRequestId: String(request.id) }}
+    >
+      <div className="space-y-2">
+        <Label htmlFor={noteId}>Decline Note (optional)</Label>
+        <Textarea
+          id={noteId}
+          name="declineNote"
+          maxLength={DECLINE_NOTE_MAX_LENGTH}
+          placeholder="Tell the learner why. This goes in the email."
+        />
+      </div>
+    </ConfirmAction>
+  );
+}
+
+// ─── History: decided Refund Requests ───
+
+function DecidedRefundRequestsSection({
+  requests,
+}: {
+  requests: DecidedRefundRequestRow[];
+}) {
+  return (
+    <section className="mt-12">
+      <h2 className="mb-4 text-xl font-semibold">History</h2>
+      {requests.length === 0 ? (
+        <Card>
+          <CardContent className="py-8 text-center text-muted-foreground">
+            No decided Refund Requests yet.
+          </CardContent>
+        </Card>
+      ) : (
+        <Card>
+          <CardContent className="p-0">
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-border bg-muted/50">
+                    <HeaderCell>Learner</HeaderCell>
+                    <HeaderCell>Course</HeaderCell>
+                    <HeaderCell>Amount paid</HeaderCell>
+                    <HeaderCell>Decision</HeaderCell>
+                    <HeaderCell>Decided</HeaderCell>
+                    <HeaderCell>Reason</HeaderCell>
+                  </tr>
+                </thead>
+                <tbody>
+                  {requests.map((request) => (
+                    <DecidedRefundRequestRowView
+                      key={request.id}
+                      request={request}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+    </section>
+  );
+}
+
+function DecidedRefundRequestRowView({
+  request,
+}: {
+  request: DecidedRefundRequestRow;
+}) {
+  return (
+    <tr className="border-b border-border align-top last:border-0">
+      <td className="px-4 py-3 text-sm">
+        <div className="font-medium">{request.learnerName}</div>
+        <div className="text-muted-foreground">{request.learnerEmail}</div>
+      </td>
+      <td className="px-4 py-3 text-sm">{request.courseTitle}</td>
+      <td className="px-4 py-3 text-sm">{formatPrice(request.amountPaid)}</td>
+      <td className="px-4 py-3 text-sm">
+        <DecisionPill status={request.status} />
+        {request.status === RefundRequestStatus.Declined && (
+          <p className="mt-2 max-w-xs whitespace-pre-wrap text-muted-foreground">
+            {request.declineNote ? (
+              <>Note: {request.declineNote}</>
+            ) : (
+              <span className="italic">No Decline Note</span>
+            )}
+          </p>
+        )}
+      </td>
+      <td className="px-4 py-3 text-sm text-muted-foreground">
+        {request.resolvedAt
+          ? new Date(request.resolvedAt).toLocaleDateString()
+          : "—"}
+        {request.resolvedByName && <div>by {request.resolvedByName}</div>}
+      </td>
+      <td className="max-w-md whitespace-pre-wrap px-4 py-3 text-sm">
+        {request.reason}
+      </td>
+    </tr>
+  );
+}
+
+function DecisionPill({ status }: { status: RefundRequestStatus }) {
+  const declined = status === RefundRequestStatus.Declined;
+  return (
+    <span
+      className={
+        declined
+          ? "rounded-full bg-red-100 px-2.5 py-0.5 text-xs font-medium text-red-800 dark:bg-red-900/30 dark:text-red-300"
+          : "rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800 dark:bg-green-900/30 dark:text-green-300"
+      }
+    >
+      {declined ? "Declined" : "Approved"}
+    </span>
   );
 }
 
