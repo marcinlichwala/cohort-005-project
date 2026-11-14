@@ -353,15 +353,17 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
   );
 }
 
-// A Failed Refund is still owed and the team is retrying, so the learner
-// sees it as "processing" rather than a failure they need to act on.
+// Pending and Issued show as they are. A Failed Refund is still owed and the
+// team is retrying, so the learner sees it as "processing" rather than a
+// failure they need to act on.
 function learnerRefundStatus(status: RefundStatus) {
   switch (status) {
     case RefundStatus.Pending:
+      return "pending";
+    case RefundStatus.Issued:
+      return "issued";
     case RefundStatus.Failed:
       return "processing";
-    case RefundStatus.Issued:
-      return "sent";
   }
 }
 

@@ -4,6 +4,9 @@ import { createTestDb, seedBaseData } from "~/test/setup";
 import {
   courses,
   CourseStatus,
+  enrollments,
+  lessonProgress,
+  LessonProgressStatus,
   lessons,
   modules,
   purchases,
@@ -31,6 +34,8 @@ import {
   findOpenRefundRequest,
   listOpenRefundRequests,
   listRefundRequests,
+  markRefundFailed,
+  markRefundIssued,
   RefundRuleError,
 } from "./refunds.server";
 
@@ -544,6 +549,193 @@ describe("refund module for admins", () => {
       expect(email.body).toContain("Hi Liam Learner,");
       expect(email.body).toContain('We have approved your refund request for "Test Course".');
       expect(email.body).toContain("$79.00");
+    });
+  });
+
+  // ─── Marking a Refund Issued or Failed ───
+
+  describe("markRefundIssued and markRefundFailed", () => {
+    // Emails go to the console log; keep test output quiet.
+    beforeEach(() => {
+      vi.spyOn(console, "log").mockImplementation(() => {});
+    });
+
+    /** An enrolled learner whose Refund Request was approved: a Pending Refund. */
+    function addPendingRefund(name = "Liam Learner") {
+      const approver = addAdmin("Approving Admin");
+      const open = addOpenRequest(base, { name, amountPaid: 7900, requestedDaysAgo: 4 });
+      testDb
+        .insert(enrollments)
+        .values({ userId: open.learner.id, courseId: base.course.id })
+        .run();
+      const { refund } = approveRefundRequest(open.request.id, approver.id);
+      return { ...open, refund };
+    }
+
+    function refundRow(requestId: number) {
+      const row = listRefundRequests().decided.find((r) => r.id === requestId);
+      if (!row) throw new Error(`No decided Refund Request ${requestId}`);
+      return row;
+    }
+
+    it("marks a Pending Refund Issued and records which admin did it and when", () => {
+      const { request, refund } = addPendingRefund();
+      const admin = addAdmin("Alex Rivera");
+      vi.setSystemTime(new Date(NOW.getTime() + 60_000));
+
+      markRefundIssued(refund.id, admin.id);
+
+      expect(refundRow(request.id)).toMatchObject({
+        refundStatus: RefundStatus.Issued,
+        refundStatusChangedAt: new Date(NOW.getTime() + 60_000).toISOString(),
+        refundStatusChangedByName: "Alex Rivera",
+      });
+    });
+
+    function enrollmentFor(userId: number) {
+      return testDb.select().from(enrollments).where(eq(enrollments.userId, userId)).all();
+    }
+
+    it("ends course access by deleting the enrollment, but keeps lesson progress and watch history", () => {
+      // Buying the course again should pick up where the learner left off.
+      const { learner, refund } = addPendingRefund();
+      const lesson = addLesson(base.course.id, "Intro");
+      testDb
+        .insert(lessonProgress)
+        .values({ userId: learner.id, lessonId: lesson.id, status: LessonProgressStatus.Completed })
+        .run();
+      addWatchEvent(learner.id, lesson.id, 1800);
+      const admin = addAdmin("Alex Rivera");
+
+      markRefundIssued(refund.id, admin.id);
+
+      expect(enrollmentFor(learner.id)).toEqual([]);
+      expect(
+        testDb.select().from(lessonProgress).where(eq(lessonProgress.userId, learner.id)).all()
+      ).toHaveLength(1);
+      expect(
+        testDb.select().from(videoWatchEvents).where(eq(videoWatchEvents.userId, learner.id)).all()
+      ).toHaveLength(1);
+    });
+
+    it("leaves the learner's enrollments in other courses alone", () => {
+      const { learner, refund } = addPendingRefund();
+      const otherCourse = addCourse(base, "Other Course");
+      testDb.insert(enrollments).values({ userId: learner.id, courseId: otherCourse.id }).run();
+      const admin = addAdmin("Alex Rivera");
+
+      markRefundIssued(refund.id, admin.id);
+
+      expect(enrollmentFor(learner.id).map((e) => e.courseId)).toEqual([otherCourse.id]);
+    });
+
+    it("builds a \"your money is on its way\" email to the learner", () => {
+      const { refund } = addPendingRefund();
+      const admin = addAdmin("Alex Rivera");
+
+      const { email } = markRefundIssued(refund.id, admin.id);
+
+      expect(email.to).toBe("liam.learner@example.com");
+      expect(email.subject).toBe("Your refund is on its way — Test Course");
+      expect(email.body).toContain("Hi Liam Learner,");
+      expect(email.body).toContain("$79.00");
+      expect(email.body).toContain("your money is on its way");
+    });
+
+    it("marks a Pending Refund Failed and records which admin did it and when", () => {
+      const { request, refund } = addPendingRefund();
+      const admin = addAdmin("Alex Rivera");
+      vi.setSystemTime(new Date(NOW.getTime() + 60_000));
+
+      markRefundFailed(refund.id, admin.id);
+
+      expect(refundRow(request.id)).toMatchObject({
+        // The decision hasn't changed: the request stays Approved.
+        status: RefundRequestStatus.Approved,
+        refundStatus: RefundStatus.Failed,
+        refundStatusChangedAt: new Date(NOW.getTime() + 60_000).toISOString(),
+        refundStatusChangedByName: "Alex Rivera",
+      });
+    });
+
+    it("sends no email when a Refund is marked Failed, and the learner keeps access", () => {
+      // The team is already retrying; telling the learner would only alarm them.
+      const { learner, refund } = addPendingRefund();
+      const admin = addAdmin("Alex Rivera");
+      // Approving logged its own email; only what happens from here counts.
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      log.mockClear();
+
+      markRefundFailed(refund.id, admin.id);
+
+      expect(log).not.toHaveBeenCalled();
+      expect(enrollmentFor(learner.id)).toHaveLength(1);
+    });
+
+    it("marks a Failed Refund Issued after a successful retry, with the same side effects", () => {
+      const { learner, request, refund } = addPendingRefund();
+      const admin = addAdmin("Alex Rivera");
+      markRefundFailed(refund.id, admin.id);
+
+      const { email } = markRefundIssued(refund.id, admin.id);
+
+      expect(refundRow(request.id).refundStatus).toBe(RefundStatus.Issued);
+      expect(enrollmentFor(learner.id)).toEqual([]);
+      expect(email.subject).toBe("Your refund is on its way — Test Course");
+    });
+
+    it("rejects marking an Issued Refund Issued again, because Issued is final", () => {
+      const { refund } = addPendingRefund();
+      const admin = addAdmin("Alex Rivera");
+      markRefundIssued(refund.id, admin.id);
+
+      expect(() => markRefundIssued(refund.id, admin.id)).toThrow(
+        new RefundRuleError("This Refund has already been issued, so it can't be marked issued.")
+      );
+    });
+
+    it("rejects marking an Issued Refund Failed, and leaves it Issued with the original audit trail", () => {
+      const { request, refund } = addPendingRefund();
+      const first = addAdmin("First Admin");
+      const second = addAdmin("Second Admin");
+      markRefundIssued(refund.id, first.id);
+
+      expect(() => markRefundFailed(refund.id, second.id)).toThrow(
+        new RefundRuleError("This Refund has already been issued, so it can't be marked failed.")
+      );
+      expect(refundRow(request.id)).toMatchObject({
+        refundStatus: RefundStatus.Issued,
+        refundStatusChangedByName: "First Admin",
+      });
+    });
+
+    it("rejects marking a Failed Refund Failed again", () => {
+      const { refund } = addPendingRefund();
+      const admin = addAdmin("Alex Rivera");
+      markRefundFailed(refund.id, admin.id);
+
+      expect(() => markRefundFailed(refund.id, admin.id)).toThrow(
+        new RefundRuleError("This Refund has already failed, so it can't be marked failed.")
+      );
+    });
+
+    it("rejects a Refund that doesn't exist", () => {
+      const admin = addAdmin("Alex Rivera");
+
+      expect(() => markRefundIssued(999, admin.id)).toThrow(
+        new RefundRuleError("That Refund doesn't exist.")
+      );
+    });
+
+    it("rolls back a rejected change: a second Issued doesn't re-run its side effects", () => {
+      // The learner bought the course again after the first Issued Refund.
+      const { learner, refund } = addPendingRefund();
+      const admin = addAdmin("Alex Rivera");
+      markRefundIssued(refund.id, admin.id);
+      testDb.insert(enrollments).values({ userId: learner.id, courseId: base.course.id }).run();
+
+      expect(() => markRefundIssued(refund.id, admin.id)).toThrow(RefundRuleError);
+      expect(enrollmentFor(learner.id)).toHaveLength(1);
     });
   });
 });

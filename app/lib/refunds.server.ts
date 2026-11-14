@@ -3,6 +3,7 @@ import { and, asc, desc, eq, ne } from "drizzle-orm";
 import { db } from "~/db";
 import {
   courses,
+  enrollments,
   purchases,
   refundRequests,
   refunds,
@@ -66,6 +67,7 @@ export type DecidedRefundRequestRow = ReturnType<
 >[number];
 
 const resolvers = alias(users, "resolvers");
+const refundStatusChangers = alias(users, "refund_status_changers");
 
 /**
  * Every Refund Request that has been decided (Approved or Declined), most
@@ -89,6 +91,8 @@ export function listDecidedRefundRequests() {
       refundId: refunds.id,
       refundStatus: refunds.status,
       refundAmount: refunds.amount,
+      refundStatusChangedAt: refunds.statusChangedAt,
+      refundStatusChangedByName: refundStatusChangers.name,
     })
     .from(refundRequests)
     .innerJoin(purchases, eq(refundRequests.purchaseId, purchases.id))
@@ -96,6 +100,10 @@ export function listDecidedRefundRequests() {
     .innerJoin(courses, eq(purchases.courseId, courses.id))
     .leftJoin(resolvers, eq(refundRequests.resolvedByUserId, resolvers.id))
     .leftJoin(refunds, eq(refunds.refundRequestId, refundRequests.id))
+    .leftJoin(
+      refundStatusChangers,
+      eq(refunds.statusChangedByUserId, refundStatusChangers.id)
+    )
     .where(ne(refundRequests.status, RefundRequestStatus.Open))
     .orderBy(desc(refundRequests.resolvedAt), desc(refundRequests.id))
     .all();
@@ -285,6 +293,137 @@ export function declineRefundRequest(
   return { email };
 }
 
+// ─── Mark Issued / Mark Failed ───
+
+type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/** The facts about a Refund that its status changes and side effects need. */
+type RefundContext = {
+  refundId: number;
+  status: RefundStatus;
+  amount: number;
+  purchaseId: number;
+  learnerId: number;
+  learnerName: string;
+  learnerEmail: string;
+  courseId: number;
+  courseTitle: string;
+};
+
+function loadRefund(tx: Transaction, refundId: number): RefundContext {
+  const refund = tx
+    .select({
+      refundId: refunds.id,
+      status: refunds.status,
+      amount: refunds.amount,
+      purchaseId: purchases.id,
+      learnerId: users.id,
+      learnerName: users.name,
+      learnerEmail: users.email,
+      courseId: courses.id,
+      courseTitle: courses.title,
+    })
+    .from(refunds)
+    .innerJoin(refundRequests, eq(refunds.refundRequestId, refundRequests.id))
+    .innerJoin(purchases, eq(refundRequests.purchaseId, purchases.id))
+    .innerJoin(users, eq(purchases.userId, users.id))
+    .innerJoin(courses, eq(purchases.courseId, courses.id))
+    .where(eq(refunds.id, refundId))
+    .get();
+
+  if (!refund) throw new RefundRuleError("That Refund doesn't exist.");
+  return refund;
+}
+
+/**
+ * The allowed Refund status changes. Issued is final; a Failed Refund can
+ * be retried and later marked Issued.
+ */
+const ALLOWED_REFUND_CHANGES: Record<RefundStatus, readonly RefundStatus[]> = {
+  [RefundStatus.Pending]: [RefundStatus.Issued, RefundStatus.Failed],
+  [RefundStatus.Failed]: [RefundStatus.Issued],
+  [RefundStatus.Issued]: [],
+};
+
+const REFUND_STATUS_PAST: Record<RefundStatus, string> = {
+  [RefundStatus.Pending]: "pending",
+  [RefundStatus.Issued]: "been issued",
+  [RefundStatus.Failed]: "failed",
+};
+
+/**
+ * Moves a Refund to a new status, recording the admin and the time, or
+ * throws a RefundRuleError if the change isn't allowed.
+ */
+function changeRefundStatus(
+  tx: Transaction,
+  refund: RefundContext,
+  to: RefundStatus,
+  adminUserId: number
+) {
+  if (!ALLOWED_REFUND_CHANGES[refund.status].includes(to)) {
+    throw new RefundRuleError(
+      `This Refund has already ${REFUND_STATUS_PAST[refund.status]}, so it can't be marked ${to}.`
+    );
+  }
+
+  tx.update(refunds)
+    .set({
+      status: to,
+      statusChangedAt: new Date().toISOString(),
+      statusChangedByUserId: adminUserId,
+    })
+    // Guarding on the status read above means two admins acting at once
+    // can't both apply a change.
+    .where(and(eq(refunds.id, refund.refundId), eq(refunds.status, refund.status)))
+    .run();
+}
+
+/**
+ * Ends the learner's access to the course. Access depends on the
+ * enrollment, so deleting it is enough; lesson progress and watch history
+ * stay, so buying the course again picks up where they left off.
+ */
+function endCourseAccess(tx: Transaction, refund: RefundContext) {
+  tx.delete(enrollments)
+    .where(
+      and(
+        eq(enrollments.userId, refund.learnerId),
+        eq(enrollments.courseId, refund.courseId)
+      )
+    )
+    .run();
+}
+
+/**
+ * Marks a Refund Issued: the admin has confirmed the money was sent.
+ * Everything that follows from it happens in the same transaction.
+ */
+export function markRefundIssued(refundId: number, adminUserId: number) {
+  const email = db.transaction((tx) => {
+    const refund = loadRefund(tx, refundId);
+    changeRefundStatus(tx, refund, RefundStatus.Issued, adminUserId);
+    // Side effects of an Issued Refund. Voiding unclaimed team seats from
+    // the purchase (#8) belongs here too, in the same transaction.
+    endCourseAccess(tx, refund);
+    return buildIssuedEmail(refund);
+  });
+
+  logEmail(email);
+  return { email };
+}
+
+/**
+ * Marks a Refund Failed: the money couldn't be sent and the team will
+ * retry. No email goes out, and the learner keeps access.
+ */
+export function markRefundFailed(refundId: number, adminUserId: number) {
+  db.transaction((tx) => {
+    const refund = loadRefund(tx, refundId);
+    changeRefundStatus(tx, refund, RefundStatus.Failed, adminUserId);
+  });
+}
+
 // ─── Emails ───
 // Built as plain objects and logged; there is no mail transport yet.
 
@@ -330,6 +469,28 @@ function buildDeclineEmail(input: {
         : []),
       "",
       "You keep your access to the course. If something has changed, you can raise a new refund request from the course page.",
+      "",
+      "— The Cadence team",
+    ].join("\n"),
+  };
+}
+
+function buildIssuedEmail(input: {
+  learnerName: string;
+  learnerEmail: string;
+  courseTitle: string;
+  amount: number;
+}): Email {
+  return {
+    to: input.learnerEmail,
+    subject: `Your refund is on its way — ${input.courseTitle}`,
+    body: [
+      `Hi ${input.learnerName},`,
+      "",
+      `Good news: your money is on its way. We have sent back ${formatPrice(input.amount)} for "${input.courseTitle}".`,
+      "Depending on your bank, it can take a few days to reach your account.",
+      "",
+      "Your access to the course has ended. Your progress is saved, so if you buy the course again you can pick up where you left off.",
       "",
       "— The Cadence team",
     ].join("\n"),

@@ -7,6 +7,8 @@ import {
   approveRefundRequest,
   declineRefundRequest,
   listRefundRequests,
+  markRefundFailed,
+  markRefundIssued,
   RefundRuleError,
   type DecidedRefundRequestRow,
   type OpenRefundRequestRow,
@@ -50,6 +52,14 @@ const refundActionSchema = z.discriminatedUnion("intent", [
       )
       .optional(),
   }),
+  z.object({
+    intent: z.literal("mark-issued"),
+    refundId: z.coerce.number().int(),
+  }),
+  z.object({
+    intent: z.literal("mark-failed"),
+    refundId: z.coerce.number().int(),
+  }),
 ]);
 
 export async function loader({ request }: Route.LoaderArgs) {
@@ -79,6 +89,12 @@ export async function action({ request }: Route.ActionArgs) {
           userId,
           parsed.data.declineNote
         );
+        return { success: true };
+      case "mark-issued":
+        markRefundIssued(parsed.data.refundId, userId);
+        return { success: true };
+      case "mark-failed":
+        markRefundFailed(parsed.data.refundId, userId);
         return { success: true };
     }
   } catch (error) {
@@ -351,7 +367,17 @@ function DecidedRefundRequestRowView({
       </td>
       <td className="px-4 py-3 text-sm">
         {request.refundStatus ? (
-          <RefundStatusPill status={request.refundStatus} />
+          <>
+            <RefundStatusPill status={request.refundStatus} />
+            {request.refundStatusChangedAt && (
+              <div className="mt-1 text-muted-foreground">
+                {new Date(request.refundStatusChangedAt).toLocaleDateString()}
+                {request.refundStatusChangedByName &&
+                  ` by ${request.refundStatusChangedByName}`}
+              </div>
+            )}
+            <RefundStatusControls request={request} />
+          </>
         ) : (
           <span className="text-muted-foreground">—</span>
         )}
@@ -360,6 +386,60 @@ function DecidedRefundRequestRowView({
         {request.reason}
       </td>
     </tr>
+  );
+}
+
+// Only the changes the refund module allows are offered: Pending can become
+// Issued or Failed, Failed can become Issued, and Issued is final.
+function RefundStatusControls({
+  request,
+}: {
+  request: DecidedRefundRequestRow;
+}) {
+  const { refundId, refundStatus } = request;
+  if (refundId === null || refundStatus === null) return null;
+  const canMarkIssued =
+    refundStatus === RefundStatus.Pending ||
+    refundStatus === RefundStatus.Failed;
+  const canMarkFailed = refundStatus === RefundStatus.Pending;
+  if (!canMarkIssued && !canMarkFailed) return null;
+
+  const amount = formatPrice(request.refundAmount ?? request.amountPaid);
+  return (
+    <div className="mt-2 flex flex-wrap gap-2">
+      {canMarkIssued && (
+        <ConfirmAction
+          triggerLabel="Mark Issued"
+          title="Mark this Refund Issued?"
+          description={
+            <>
+              Confirm you have sent <strong>{amount}</strong> to{" "}
+              {request.learnerName}. Their enrollment in {request.courseTitle}{" "}
+              ends (progress is kept) and they get a "your money is on its
+              way" email. Issued is final.
+            </>
+          }
+          confirmLabel="Mark Issued"
+          fields={{ intent: "mark-issued", refundId: String(refundId) }}
+        />
+      )}
+      {canMarkFailed && (
+        <ConfirmAction
+          triggerLabel="Mark Failed"
+          variant="destructive"
+          title="Mark this Refund Failed?"
+          description={
+            <>
+              The {amount} to {request.learnerName} couldn't be sent. No email
+              goes out and they keep access. You can mark it Issued after a
+              successful retry.
+            </>
+          }
+          confirmLabel="Mark Failed"
+          fields={{ intent: "mark-failed", refundId: String(refundId) }}
+        />
+      )}
+    </div>
   );
 }
 

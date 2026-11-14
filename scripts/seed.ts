@@ -2887,6 +2887,89 @@ This course is still in draft while the cluster examples are rewritten against t
 
   console.log("Created Noah's Approved Refund Request and Pending Refund.");
 
+  // ─── Approved Refund Requests with Failed and Issued Refunds ───
+  // Ines's Refund couldn't be sent, so it is Failed: she keeps her
+  // enrollment while the team retries. Lucas's Refund is Issued, which is
+  // final and ended his access, so he has no enrollment.
+
+  function seedApprovedRefund(input: {
+    name: string;
+    email: string;
+    avatarSeed: string;
+    reason: string;
+    refundStatus: RefundStatus;
+    enrolled: boolean;
+  }) {
+    const [learner] = db
+      .insert(schema.users)
+      .values({
+        name: input.name,
+        email: input.email,
+        role: UserRole.Student,
+        avatarUrl: `https://api.dicebear.com/9.x/avataaars/svg?seed=${input.avatarSeed}`,
+        createdAt: daysAgo(25),
+      })
+      .returning()
+      .all();
+    const [purchase] = db
+      .insert(schema.purchases)
+      .values({
+        userId: learner.id,
+        courseId: course1.id,
+        amountPaid: 7900,
+        country: null,
+        createdAt: daysAgo(13),
+      })
+      .returning()
+      .all();
+    if (input.enrolled) {
+      db.insert(schema.enrollments)
+        .values({ userId: learner.id, courseId: course1.id, enrolledAt: daysAgo(13) })
+        .run();
+    }
+    const [request] = db
+      .insert(schema.refundRequests)
+      .values({
+        purchaseId: purchase.id,
+        status: RefundRequestStatus.Approved,
+        reason: input.reason,
+        requestedAt: daysAgo(8),
+        resolvedAt: daysAgo(5),
+        resolvedByUserId: admin.id,
+      })
+      .returning()
+      .all();
+    db.insert(schema.refunds)
+      .values({
+        refundRequestId: request.id,
+        amount: purchase.amountPaid,
+        status: input.refundStatus,
+        createdAt: daysAgo(5),
+        statusChangedAt: daysAgo(1),
+        statusChangedByUserId: admin.id,
+      })
+      .run();
+  }
+
+  seedApprovedRefund({
+    name: "Ines Novak",
+    email: "ines.novak@student.dev",
+    avatarSeed: "ines-novak",
+    reason: "My employer is now paying for a different training programme.",
+    refundStatus: RefundStatus.Failed,
+    enrolled: true,
+  });
+  seedApprovedRefund({
+    name: "Lucas Ferreira",
+    email: "lucas.ferreira@student.dev",
+    avatarSeed: "lucas-ferreira",
+    reason: "I already know most of this material from my previous job.",
+    refundStatus: RefundStatus.Issued,
+    enrolled: false,
+  });
+
+  console.log("Created Ines's Failed Refund and Lucas's Issued Refund.");
+
   // ─── Flush watch events ───
   // Batched: the heartbeat makes these by far the largest table, and one
   // statement per row would dominate the seed's runtime.
@@ -2939,7 +3022,7 @@ This course is still in draft while the cluster examples are rewritten against t
     `  Purchases: ${countRows(schema.purchases)} (${countRows(schema.purchases, gte(schema.purchases.createdAt, sevenDaysAgo))} in the last 7 days), spanning ${historyDays} days`
   );
   console.log(
-    `  Refund Requests: ${countRows(schema.refundRequests)} (${countRows(schema.refundRequests, eq(schema.refundRequests.status, RefundRequestStatus.Open))} open, ${countRows(schema.refundRequests, eq(schema.refundRequests.status, RefundRequestStatus.Declined))} declined, ${countRows(schema.refundRequests, eq(schema.refundRequests.status, RefundRequestStatus.Approved))} approved), refunds: ${countRows(schema.refunds)} (${countRows(schema.refunds, eq(schema.refunds.status, RefundStatus.Pending))} pending)`
+    `  Refund Requests: ${countRows(schema.refundRequests)} (${countRows(schema.refundRequests, eq(schema.refundRequests.status, RefundRequestStatus.Open))} open, ${countRows(schema.refundRequests, eq(schema.refundRequests.status, RefundRequestStatus.Declined))} declined, ${countRows(schema.refundRequests, eq(schema.refundRequests.status, RefundRequestStatus.Approved))} approved), refunds: ${countRows(schema.refunds)} (${countRows(schema.refunds, eq(schema.refunds.status, RefundStatus.Pending))} pending, ${countRows(schema.refunds, eq(schema.refunds.status, RefundStatus.Failed))} failed, ${countRows(schema.refunds, eq(schema.refunds.status, RefundStatus.Issued))} issued)`
   );
   console.log(
     `  Teams: ${countRows(schema.teams)}, coupons: ${countRows(schema.coupons)} (${countRows(schema.coupons, isNotNull(schema.coupons.redeemedByUserId))} redeemed)`
