@@ -1,7 +1,8 @@
 import { alias } from "drizzle-orm/sqlite-core";
-import { and, asc, desc, eq, ne } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, ne } from "drizzle-orm";
 import { db } from "~/db";
 import {
+  coupons,
   courses,
   enrollments,
   purchases,
@@ -396,6 +397,24 @@ function endCourseAccess(tx: Transaction, refund: RefundContext) {
 }
 
 /**
+ * Voids every unclaimed seat coupon from the purchase, so nobody can take a
+ * seat that has been refunded. Claimed coupons are left alone: the person
+ * who claimed one keeps their seat.
+ */
+function voidUnclaimedSeats(tx: Transaction, refund: RefundContext) {
+  tx.update(coupons)
+    .set({ voidedAt: new Date().toISOString() })
+    .where(
+      and(
+        eq(coupons.purchaseId, refund.purchaseId),
+        isNull(coupons.redeemedByUserId),
+        isNull(coupons.voidedAt)
+      )
+    )
+    .run();
+}
+
+/**
  * Marks a Refund Issued: the admin has confirmed the money was sent.
  * Everything that follows from it happens in the same transaction.
  */
@@ -403,9 +422,9 @@ export function markRefundIssued(refundId: number, adminUserId: number) {
   const email = db.transaction((tx) => {
     const refund = loadRefund(tx, refundId);
     changeRefundStatus(tx, refund, RefundStatus.Issued, adminUserId);
-    // Side effects of an Issued Refund. Voiding unclaimed team seats from
-    // the purchase (#8) belongs here too, in the same transaction.
+    // Side effects of an Issued Refund, in the same transaction.
     endCourseAccess(tx, refund);
+    voidUnclaimedSeats(tx, refund);
     return buildIssuedEmail(refund);
   });
 

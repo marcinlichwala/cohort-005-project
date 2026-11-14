@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import {
+  coupons,
   courses,
   CourseStatus,
   enrollments,
@@ -11,6 +12,7 @@ import {
   modules,
   purchases,
   refundRequests,
+  teams,
   users,
   videoWatchEvents,
   RefundRequestStatus,
@@ -640,6 +642,81 @@ describe("refund module for admins", () => {
       expect(email.body).toContain("Hi Liam Learner,");
       expect(email.body).toContain("$79.00");
       expect(email.body).toContain("your money is on its way");
+    });
+
+    // ─── Team seats on an Issued Refund ───
+
+    /** Seat coupons on a purchase; pass a user id to make a seat claimed. */
+    function addCoupons(purchaseId: number, claimedBy: (number | null)[]) {
+      const team = testDb.insert(teams).values({}).returning().get();
+      return claimedBy.map((userId, i) =>
+        testDb
+          .insert(coupons)
+          .values({
+            teamId: team.id,
+            courseId: base.course.id,
+            code: `SEAT-${purchaseId}-${i}`,
+            purchaseId,
+            redeemedByUserId: userId,
+            redeemedAt: userId === null ? null : daysBeforeNow(1),
+          })
+          .returning()
+          .get()
+      );
+    }
+
+    function couponById(id: number) {
+      const coupon = testDb.select().from(coupons).where(eq(coupons.id, id)).get();
+      if (!coupon) throw new Error(`No coupon ${id}`);
+      return coupon;
+    }
+
+    it("voids every unclaimed seat coupon from the purchase, so nobody can take a refunded seat", () => {
+      const { purchase, refund } = addPendingRefund();
+      const seats = addCoupons(purchase.id, [null, null]);
+      const admin = addAdmin("Alex Rivera");
+      vi.setSystemTime(new Date(NOW.getTime() + 60_000));
+
+      markRefundIssued(refund.id, admin.id);
+
+      for (const seat of seats) {
+        expect(couponById(seat.id).voidedAt).toBe(
+          new Date(NOW.getTime() + 60_000).toISOString()
+        );
+      }
+    });
+
+    it("leaves claimed seat coupons alone: the person who claimed it keeps their seat", () => {
+      const { purchase, refund } = addPendingRefund();
+      const colleague = addLearner("Cara Colleague", "cara@example.com");
+      const [claimed, unclaimed] = addCoupons(purchase.id, [colleague.id, null]);
+      const admin = addAdmin("Alex Rivera");
+
+      markRefundIssued(refund.id, admin.id);
+
+      expect(couponById(claimed.id).voidedAt).toBeNull();
+      expect(couponById(unclaimed.id).voidedAt).not.toBeNull();
+    });
+
+    it("leaves seat coupons from other purchases alone", () => {
+      const { refund } = addPendingRefund();
+      const other = addOpenRequest(base, { name: "Olive Other", requestedDaysAgo: 2 });
+      const [otherSeat] = addCoupons(other.purchase.id, [null]);
+      const admin = addAdmin("Alex Rivera");
+
+      markRefundIssued(refund.id, admin.id);
+
+      expect(couponById(otherSeat.id).voidedAt).toBeNull();
+    });
+
+    it("doesn't void seats when a Refund is marked Failed: the refund hasn't happened yet", () => {
+      const { purchase, refund } = addPendingRefund();
+      const [seat] = addCoupons(purchase.id, [null]);
+      const admin = addAdmin("Alex Rivera");
+
+      markRefundFailed(refund.id, admin.id);
+
+      expect(couponById(seat.id).voidedAt).toBeNull();
     });
 
     it("marks a Pending Refund Failed and records which admin did it and when", () => {

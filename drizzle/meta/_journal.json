@@ -99,6 +99,13 @@
       "when": 1794676050852,
       "tag": "0013_add_refunds",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1794676504644,
+      "tag": "0014_add_voided_at_to_coupons",
+      "breakpoints": true
     }
   ]
 }
