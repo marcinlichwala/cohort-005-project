@@ -1,4 +1,4 @@
-# A place on a course ends when the Refund Request is approved
+# An Enrollment ends when the Refund Request is approved
 
 The buyer keeps the course while their Refund Request is Open and loses it the moment a Platform Admin approves it, not when the Refund is issued.
 
