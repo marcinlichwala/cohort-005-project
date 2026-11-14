@@ -1,14 +1,23 @@
-import { AlertTriangle, ReceiptText } from "lucide-react";
-import { isRouteErrorResponse, Link } from "react-router";
+import { useEffect, useState } from "react";
+import { AlertTriangle, History, ReceiptText } from "lucide-react";
+import { data, isRouteErrorResponse, Link, useFetcher } from "react-router";
+import { toast } from "sonner";
+import { z } from "zod";
 import type { Route } from "./+types/admin.refunds";
+import { RefundRequestStatus, RefundStatus } from "~/db/schema";
 import { requirePlatformAdmin } from "~/lib/access.server";
 import {
-  listOpenRefundRequests,
+  approveRefundRequest,
+  listRefundRequests,
+  RefundRuleError,
+  type DecidedRefundRequestRow,
   type OpenRefundRequestRow,
 } from "~/lib/refunds.server";
+import { parseFormData } from "~/lib/validation";
 import { formatPrice } from "~/lib/utils";
 import { Card, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
+import { ConfirmDialog } from "~/components/confirm-dialog";
 
 // Admin-only: the loader and every action call requirePlatformAdmin first.
 // All refund logic lives in ~/lib/refunds.server; this route only parses
@@ -21,14 +30,50 @@ export function meta() {
   ];
 }
 
+// One member per admin decision. Later tickets add decline, mark-issued and
+// mark-failed alongside approve.
+const refundActionSchema = z.discriminatedUnion("intent", [
+  z.object({
+    intent: z.literal("approve"),
+    refundRequestId: z.coerce.number().int().positive(),
+  }),
+]);
+
 export async function loader({ request }: Route.LoaderArgs) {
   await requirePlatformAdmin(request);
 
-  return { openRequests: listOpenRefundRequests() };
+  const { open, decided } = listRefundRequests();
+  return { openRequests: open, decidedRequests: decided };
+}
+
+export async function action({ request }: Route.ActionArgs) {
+  const { userId } = await requirePlatformAdmin(request);
+
+  const formData = await request.formData();
+  const parsed = parseFormData(formData, refundActionSchema);
+
+  if (!parsed.success) {
+    throw data(Object.values(parsed.errors)[0] ?? "Invalid input.", {
+      status: 400,
+    });
+  }
+
+  try {
+    switch (parsed.data.intent) {
+      case "approve":
+        approveRefundRequest(parsed.data.refundRequestId, userId);
+        return { success: true, message: "Refund Request approved." };
+    }
+  } catch (error) {
+    if (error instanceof RefundRuleError) {
+      throw data(error.message, { status: 409 });
+    }
+    throw error;
+  }
 }
 
 export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
-  const { openRequests } = loaderData;
+  const { openRequests, decidedRequests } = loaderData;
 
   return (
     <div className="mx-auto max-w-7xl p-6 lg:p-8">
@@ -48,6 +93,8 @@ export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
       </div>
 
       <OpenRefundRequestsSection requests={openRequests} />
+
+      <RefundHistorySection requests={decidedRequests} />
     </div>
   );
 }
@@ -94,6 +141,7 @@ function OpenRefundRequestsSection({
                     <HeaderCell>Since purchase</HeaderCell>
                     <HeaderCell>Watched</HeaderCell>
                     <HeaderCell>Reason</HeaderCell>
+                    <HeaderCell>Decision</HeaderCell>
                   </tr>
                 </thead>
                 <tbody>
@@ -144,8 +192,192 @@ function OpenRefundRequestRowView({
       <td className="max-w-md whitespace-pre-wrap px-4 py-3 text-sm">
         {request.reason}
       </td>
+      <td className="px-4 py-3 text-sm">
+        <div className="flex flex-wrap gap-2">
+          <ApproveButton request={request} />
+        </div>
+      </td>
     </tr>
   );
+}
+
+// ─── Decisions ───
+
+function ApproveButton({ request }: { request: OpenRefundRequestRow }) {
+  const fetcher = useFetcher<typeof action>();
+  const [confirming, setConfirming] = useState(false);
+  const pending = fetcher.state !== "idle";
+
+  useEffect(() => {
+    if (fetcher.state === "idle" && fetcher.data?.success) {
+      toast.success(fetcher.data.message);
+      setConfirming(false);
+    }
+  }, [fetcher.state, fetcher.data]);
+
+  return (
+    <>
+      <Button size="sm" onClick={() => setConfirming(true)}>
+        Approve
+      </Button>
+      <ConfirmDialog
+        open={confirming}
+        title="Approve this Refund Request?"
+        description={
+          <>
+            {request.learnerName} will get a Pending Refund of{" "}
+            <strong>{formatPrice(request.amountPaid)}</strong>, the full
+            amount paid for {request.courseTitle}, and an approval email. You
+            can't undo this.
+          </>
+        }
+        confirmLabel="Approve"
+        pendingLabel="Approving…"
+        pending={pending}
+        onCancel={() => setConfirming(false)}
+        onConfirm={() =>
+          fetcher.submit(
+            { intent: "approve", refundRequestId: String(request.id) },
+            { method: "post" }
+          )
+        }
+      />
+    </>
+  );
+}
+
+// ─── History ───
+
+function RefundHistorySection({
+  requests,
+}: {
+  requests: DecidedRefundRequestRow[];
+}) {
+  return (
+    <section className="mt-12">
+      <div className="mb-4 flex items-center gap-2">
+        <History className="size-4 text-muted-foreground" />
+        <h2 className="text-xl font-semibold">History</h2>
+      </div>
+
+      {requests.length === 0 ? (
+        <Card>
+          <CardContent className="py-8 text-center text-sm text-muted-foreground">
+            No decided Refund Requests yet.
+          </CardContent>
+        </Card>
+      ) : (
+        <Card>
+          <CardContent className="p-0">
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-border bg-muted/50">
+                    <HeaderCell>Learner</HeaderCell>
+                    <HeaderCell>Course</HeaderCell>
+                    <HeaderCell>Amount paid</HeaderCell>
+                    <HeaderCell>Decision</HeaderCell>
+                    <HeaderCell>Decided</HeaderCell>
+                    <HeaderCell>Refund</HeaderCell>
+                  </tr>
+                </thead>
+                <tbody>
+                  {requests.map((request) => (
+                    <DecidedRefundRequestRowView
+                      key={request.id}
+                      request={request}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+    </section>
+  );
+}
+
+function DecidedRefundRequestRowView({
+  request,
+}: {
+  request: DecidedRefundRequestRow;
+}) {
+  return (
+    <tr className="border-b border-border align-top last:border-0">
+      <td className="px-4 py-3 text-sm">
+        <div className="font-medium">{request.learnerName}</div>
+        <div className="text-muted-foreground">{request.learnerEmail}</div>
+      </td>
+      <td className="px-4 py-3 text-sm">{request.courseTitle}</td>
+      <td className="px-4 py-3 text-sm">{formatPrice(request.amountPaid)}</td>
+      <td className="px-4 py-3 text-sm">
+        <RefundRequestStatusBadge status={request.status} />
+      </td>
+      <td className="px-4 py-3 text-sm text-muted-foreground">
+        {request.decidedAt
+          ? new Date(request.decidedAt).toLocaleDateString()
+          : "—"}
+        {request.decidedByName ? ` by ${request.decidedByName}` : ""}
+      </td>
+      <td className="px-4 py-3 text-sm">
+        {request.refundStatus ? (
+          <RefundStatusBadge status={request.refundStatus} />
+        ) : (
+          <span className="text-muted-foreground">—</span>
+        )}
+      </td>
+    </tr>
+  );
+}
+
+const badgeClass =
+  "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium";
+
+function RefundRequestStatusBadge({ status }: { status: RefundRequestStatus }) {
+  switch (status) {
+    case RefundRequestStatus.Approved:
+      return (
+        <span className={`${badgeClass} bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300`}>
+          Approved
+        </span>
+      );
+    case RefundRequestStatus.Declined:
+      return (
+        <span className={`${badgeClass} bg-muted text-muted-foreground`}>
+          Declined
+        </span>
+      );
+    case RefundRequestStatus.Open:
+      return (
+        <span className={`${badgeClass} bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300`}>
+          Open
+        </span>
+      );
+  }
+}
+
+function RefundStatusBadge({ status }: { status: RefundStatus }) {
+  switch (status) {
+    case RefundStatus.Pending:
+      return (
+        <span className={`${badgeClass} bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300`}>
+          Pending
+        </span>
+      );
+    case RefundStatus.Issued:
+      return (
+        <span className={`${badgeClass} bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300`}>
+          Issued
+        </span>
+      );
+    case RefundStatus.Failed:
+      return (
+        <span className={`${badgeClass} bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300`}>
+          Failed
+        </span>
+      );
+  }
 }
 
 function formatHours(hours: number) {

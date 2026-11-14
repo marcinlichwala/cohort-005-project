@@ -17,11 +17,13 @@ import {
   courses,
   purchases,
   refundRequests,
+  refunds,
+  RefundStatus,
 } from "~/db/schema";
 import { AlertTriangle } from "lucide-react";
 import { data, isRouteErrorResponse, Link } from "react-router";
 import { db } from "~/db";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { formatPrice } from "~/lib/utils";
 
 const settingsSchema = z.object({
@@ -75,6 +77,28 @@ export async function loader({ request }: Route.LoaderArgs) {
     )
     .all();
 
+  const approvedRefundRequests = db
+    .select({
+      id: refundRequests.id,
+      courseTitle: courses.title,
+      courseSlug: courses.slug,
+      amount: refunds.amount,
+      refundStatus: refunds.status,
+      decidedAt: refundRequests.resolvedAt,
+    })
+    .from(refundRequests)
+    .innerJoin(purchases, eq(refundRequests.purchaseId, purchases.id))
+    .innerJoin(courses, eq(purchases.courseId, courses.id))
+    .innerJoin(refunds, eq(refunds.refundRequestId, refundRequests.id))
+    .where(
+      and(
+        eq(purchases.userId, currentUserId),
+        eq(refundRequests.status, RefundRequestStatus.Approved)
+      )
+    )
+    .orderBy(desc(refundRequests.resolvedAt))
+    .all();
+
   return {
     user: {
       id: currentUser.id,
@@ -84,6 +108,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       role: currentUser.role,
     },
     openRefundRequests,
+    approvedRefundRequests,
   };
 }
 
@@ -122,7 +147,7 @@ export async function action({ request }: Route.ActionArgs) {
 }
 
 export default function Settings({ loaderData }: Route.ComponentProps) {
-  const { user, openRefundRequests } = loaderData;
+  const { user, openRefundRequests, approvedRefundRequests } = loaderData;
   const fetcher = useFetcher();
   const nameInputRef = useRef<HTMLInputElement>(null);
 
@@ -209,14 +234,17 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
         </CardContent>
       </Card>
 
-      {openRefundRequests.length > 0 && (
+      {(openRefundRequests.length > 0 ||
+        approvedRefundRequests.length > 0) && (
         <Card className="mt-8 max-w-md">
           <CardHeader>
             <h2 className="text-lg font-semibold">Refund Requests</h2>
             <p className="text-sm text-muted-foreground">
-              {openRefundRequests.length === 1
-                ? "One refund request is waiting on us."
-                : `${openRefundRequests.length} refund requests are waiting on us.`}
+              {openRefundRequests.length === 0
+                ? "Your refund requests and where they stand."
+                : openRefundRequests.length === 1
+                  ? "One refund request is waiting on us."
+                  : `${openRefundRequests.length} refund requests are waiting on us.`}
             </p>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -240,11 +268,45 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
                 <p className="mt-2 text-sm">{refundRequest.reason}</p>
               </div>
             ))}
+            {approvedRefundRequests.map((refundRequest) => (
+              <div key={refundRequest.id} className="rounded-md border p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <Link
+                    to={`/courses/${refundRequest.courseSlug}`}
+                    className="font-medium hover:underline"
+                  >
+                    {refundRequest.courseTitle}
+                  </Link>
+                  <span className="shrink-0 rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800 dark:bg-green-900/30 dark:text-green-300">
+                    Approved
+                  </span>
+                </div>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Refund of {formatPrice(refundRequest.amount)} ·{" "}
+                  {learnerRefundStatus(refundRequest.refundStatus)}
+                  {refundRequest.decidedAt
+                    ? ` · approved ${new Date(refundRequest.decidedAt).toLocaleDateString()}`
+                    : ""}
+                </p>
+              </div>
+            ))}
           </CardContent>
         </Card>
       )}
     </div>
   );
+}
+
+// A Failed Refund is still owed, and the team is retrying, so the learner
+// sees it as "processing" rather than a failure they need to act on.
+function learnerRefundStatus(status: RefundStatus) {
+  switch (status) {
+    case RefundStatus.Pending:
+    case RefundStatus.Failed:
+      return "processing";
+    case RefundStatus.Issued:
+      return "sent";
+  }
 }
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {

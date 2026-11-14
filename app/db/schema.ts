@@ -37,6 +37,12 @@ export enum RefundRequestStatus {
   Declined = "declined",
 }
 
+export enum RefundStatus {
+  Pending = "pending",
+  Issued = "issued",
+  Failed = "failed",
+}
+
 export enum TeamMemberRole {
   Admin = "admin",
   Member = "member",
@@ -242,8 +248,6 @@ export const refundRequests = sqliteTable(
       .default(RefundRequestStatus.Open),
     // The learner's own words, in the box on the course page.
     reason: text("reason").notNull(),
-    // Null until someone approves — a declined request refunds nothing.
-    amountRefunded: integer("amount_refunded"),
     requestedAt: text("requested_at")
       .notNull()
       .$defaultFn(() => new Date().toISOString()),
@@ -252,6 +256,30 @@ export const refundRequests = sqliteTable(
   },
   (table) => [index("refund_requests_purchase_idx").on(table.purchaseId)]
 );
+
+// One Refund per Approved Refund Request: the money owed back to the learner.
+// A Declined Refund Request has no row here.
+export const refunds = sqliteTable("refunds", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  refundRequestId: integer("refund_request_id")
+    .notNull()
+    .unique()
+    .references(() => refundRequests.id),
+  // Always the full amount paid for the purchase, in cents.
+  amount: integer("amount").notNull(),
+  status: text("status")
+    .notNull()
+    .$type<RefundStatus>()
+    .default(RefundStatus.Pending),
+  createdAt: text("created_at")
+    .notNull()
+    .$defaultFn(() => new Date().toISOString()),
+  // The last status change. On creation this is the approval itself.
+  statusChangedAt: text("status_changed_at"),
+  statusChangedByUserId: integer("status_changed_by_user_id").references(
+    () => users.id
+  ),
+});
 
 export const teams = sqliteTable("teams", {
   id: integer("id").primaryKey({ autoIncrement: true }),

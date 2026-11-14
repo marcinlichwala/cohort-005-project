@@ -11,6 +11,7 @@ import {
   CourseStatus,
   LessonProgressStatus,
   RefundRequestStatus,
+  RefundStatus,
   QuestionType,
   TeamMemberRole,
 } from "../app/db/schema";
@@ -77,7 +78,8 @@ async function seed() {
     DROP TABLE IF EXISTS coupons;
     DROP TABLE IF EXISTS team_members;
     DROP TABLE IF EXISTS teams;
-    -- refund_requests was called refunds before migration 0011
+    -- Before migration 0011 this name held the Refund Requests; since 0012
+    -- it holds the Refunds, which point at refund_requests, so it drops first.
     DROP TABLE IF EXISTS refunds;
     DROP TABLE IF EXISTS refund_requests;
     DROP TABLE IF EXISTS purchases;
@@ -2785,6 +2787,60 @@ This course is still in draft while the cluster examples are rewritten against t
 
   console.log("Created Liam's Refund Request.");
 
+  // ─── Noah's Approved Refund Request ───
+  // A learner whose Refund Request Alex approved, so the Refund is Pending:
+  // the money hasn't been confirmed as sent, so Noah keeps his enrollment.
+
+  const [noah] = db
+    .insert(schema.users)
+    .values({
+      name: "Noah Bennett",
+      email: "noah.bennett@student.dev",
+      role: UserRole.Student,
+      avatarUrl: "https://api.dicebear.com/9.x/avataaars/svg?seed=noah",
+      createdAt: daysAgo(20),
+    })
+    .returning()
+    .all();
+  const [noahPurchase] = db
+    .insert(schema.purchases)
+    .values({
+      userId: noah.id,
+      courseId: course1.id,
+      amountPaid: 7900,
+      country: null,
+      createdAt: daysAgo(12),
+    })
+    .returning()
+    .all();
+  db.insert(schema.enrollments)
+    .values({ userId: noah.id, courseId: course1.id, enrolledAt: daysAgo(12) })
+    .run();
+  const [noahRequest] = db
+    .insert(schema.refundRequests)
+    .values({
+      purchaseId: noahPurchase.id,
+      status: RefundRequestStatus.Approved,
+      reason: "The pace is too fast for me — I need a beginner course first.",
+      requestedAt: daysAgo(6),
+      resolvedAt: daysAgo(2),
+      resolvedByUserId: admin.id,
+    })
+    .returning()
+    .all();
+  db.insert(schema.refunds)
+    .values({
+      refundRequestId: noahRequest.id,
+      amount: noahPurchase.amountPaid,
+      status: RefundStatus.Pending,
+      createdAt: daysAgo(2),
+      statusChangedAt: daysAgo(2),
+      statusChangedByUserId: admin.id,
+    })
+    .run();
+
+  console.log("Created Noah's Approved Refund Request and Pending Refund.");
+
   // ─── Flush watch events ───
   // Batched: the heartbeat makes these by far the largest table, and one
   // statement per row would dominate the seed's runtime.
@@ -2835,6 +2891,9 @@ This course is still in draft while the cluster examples are rewritten against t
   );
   console.log(
     `  Purchases: ${countRows(schema.purchases)} (${countRows(schema.purchases, gte(schema.purchases.createdAt, sevenDaysAgo))} in the last 7 days), spanning ${historyDays} days`
+  );
+  console.log(
+    `  Refund Requests: ${countRows(schema.refundRequests)} (${countRows(schema.refundRequests, eq(schema.refundRequests.status, RefundRequestStatus.Open))} open, ${countRows(schema.refundRequests, eq(schema.refundRequests.status, RefundRequestStatus.Approved))} approved), refunds: ${countRows(schema.refunds)} (${countRows(schema.refunds, eq(schema.refunds.status, RefundStatus.Pending))} pending)`
   );
   console.log(
     `  Teams: ${countRows(schema.teams)}, coupons: ${countRows(schema.coupons)} (${countRows(schema.coupons, isNotNull(schema.coupons.redeemedByUserId))} redeemed)`

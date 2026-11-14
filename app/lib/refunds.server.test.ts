@@ -11,6 +11,7 @@ import {
   users,
   videoWatchEvents,
   RefundRequestStatus,
+  RefundStatus,
   UserRole,
 } from "~/db/schema";
 
@@ -24,7 +25,12 @@ vi.mock("~/db", () => ({
   },
 }));
 
-import { listOpenRefundRequests } from "./refunds.server";
+import {
+  approveRefundRequest,
+  listOpenRefundRequests,
+  listRefundRequests,
+  RefundRuleError,
+} from "./refunds.server";
 
 const NOW = new Date("2026-06-15T12:00:00.000Z");
 
@@ -37,6 +43,14 @@ function daysBeforeNow(days: number) {
 // decline, mark issued, mark failed) reuse these.
 
 type Base = ReturnType<typeof seedBaseData>;
+
+function addAdmin(name = "Alex Admin") {
+  return testDb
+    .insert(users)
+    .values({ name, email: `${name.toLowerCase().replace(/\s+/g, ".")}@example.com`, role: UserRole.Admin })
+    .returning()
+    .get();
+}
 
 function addLearner(name: string, email: string) {
   return testDb
@@ -278,6 +292,119 @@ describe("refund module for admins", () => {
 
     it("returns an empty list when there are no Open Refund Requests", () => {
       expect(listOpenRefundRequests()).toEqual([]);
+    });
+  });
+  // ─── Approving ───
+
+  describe("approveRefundRequest", () => {
+    it("turns an Open Refund Request into an Approved one with a Pending Refund for the full amount paid", () => {
+      const admin = addAdmin();
+      const { request } = addOpenRequest(base, {
+        name: "Liam Learner",
+        amountPaid: 7900,
+        requestedDaysAgo: 4,
+      });
+
+      approveRefundRequest(request.id, admin.id);
+
+      const { open, decided } = listRefundRequests();
+      expect(open).toEqual([]);
+      expect(decided).toHaveLength(1);
+      expect(decided[0]).toMatchObject({
+        id: request.id,
+        status: RefundRequestStatus.Approved,
+        refundStatus: RefundStatus.Pending,
+        refundAmount: 7900,
+      });
+    });
+    it("records which admin approved it and when, for the audit trail", () => {
+      const admin = addAdmin("Alex Rivera");
+      const { request } = addOpenRequest(base, { name: "Liam Learner", requestedDaysAgo: 4 });
+
+      approveRefundRequest(request.id, admin.id);
+
+      const [row] = listRefundRequests().decided;
+      expect(row).toMatchObject({
+        decidedAt: NOW.toISOString(),
+        decidedByName: "Alex Rivera",
+      });
+    });
+    it("approves even when the learner is now past the 14-day window and over 2 hours watched (ADR 0001)", () => {
+      // Eligibility gates asking, not approving. By the time the admin gets
+      // to this request the learner is on day 30 with 3 hours watched, and
+      // the admin may still approve.
+      const admin = addAdmin();
+      const { learner, request } = addOpenRequest(base, {
+        name: "Late Larry",
+        amountPaid: 4900,
+        purchasedDaysAgo: 30,
+        requestedDaysAgo: 20,
+      });
+      const lesson = addLesson(base.course.id, "Long lesson");
+      addWatchEvent(learner.id, lesson.id, 3 * 60 * 60);
+
+      approveRefundRequest(request.id, admin.id);
+
+      const [row] = listRefundRequests().decided;
+      expect(row).toMatchObject({
+        status: RefundRequestStatus.Approved,
+        refundStatus: RefundStatus.Pending,
+        refundAmount: 4900,
+      });
+    });
+    it("rejects approving a request another admin has already approved, and creates no second Refund", () => {
+      const first = addAdmin("First Admin");
+      const second = addAdmin("Second Admin");
+      const { request } = addOpenRequest(base, { name: "Liam Learner", requestedDaysAgo: 4 });
+      approveRefundRequest(request.id, first.id);
+
+      expect(() => approveRefundRequest(request.id, second.id)).toThrow(
+        new RefundRuleError("This Refund Request has already been approved.")
+      );
+
+      const { decided } = listRefundRequests();
+      expect(decided).toHaveLength(1);
+      expect(decided[0].decidedByName).toBe("First Admin");
+    });
+
+    it("rejects approving a Declined Refund Request", () => {
+      const admin = addAdmin();
+      const learner = addLearner("Dan Declined", "dan@example.com");
+      const purchase = addPurchase({
+        userId: learner.id,
+        courseId: base.course.id,
+        amountPaid: 7900,
+        purchasedDaysAgo: 5,
+      });
+      const request = addRefundRequest({
+        purchaseId: purchase.id,
+        requestedDaysAgo: 3,
+        status: RefundRequestStatus.Declined,
+      });
+
+      expect(() => approveRefundRequest(request.id, admin.id)).toThrow(
+        new RefundRuleError("This Refund Request has already been declined.")
+      );
+
+      const [row] = listRefundRequests().decided;
+      expect(row.status).toBe(RefundRequestStatus.Declined);
+      expect(row.refundStatus).toBeNull();
+    });
+    it("builds an approval email to the learner saying how much is coming back", () => {
+      const admin = addAdmin();
+      const { request } = addOpenRequest(base, {
+        name: "Liam Learner",
+        amountPaid: 7900,
+        requestedDaysAgo: 4,
+      });
+
+      const { email } = approveRefundRequest(request.id, admin.id);
+
+      expect(email.to).toBe("liam.learner@example.com");
+      expect(email.subject).toBe("Refund approved — Test Course");
+      expect(email.body).toContain("Hi Liam Learner,");
+      expect(email.body).toContain('We have approved your refund request for "Test Course".');
+      expect(email.body).toContain("$79.00");
     });
   });
 });
