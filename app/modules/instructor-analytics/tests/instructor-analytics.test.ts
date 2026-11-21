@@ -6,7 +6,7 @@ import { markdown } from "~/lib/text";
 import {
   getInstructorAnalytics,
   type AnalyticsOptions,
-} from "./instructor-analytics.server";
+} from "../index.server";
 
 // Tests run with TZ=UTC (vitest.config.ts), so calendar days are UTC days.
 const NOW = new Date("2026-03-15T12:00:00.000Z");

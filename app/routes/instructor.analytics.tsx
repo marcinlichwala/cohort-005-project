@@ -12,7 +12,7 @@ import {
   type RefundExposure,
   type RevenueSeries,
   type TopBuyer,
-} from "~/lib/instructor-analytics.server";
+} from "~/modules/instructor-analytics/index.server";
 import {
   ANALYTICS_RANGES,
   PLATFORM_FEE_PERCENT,
