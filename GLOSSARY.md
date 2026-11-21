@@ -20,6 +20,10 @@ _Avoid_: Admin (on its own), the team, Staff
 
 **Team Admin**:
 A Student who buys and manages a Team Licence. A Team Admin has no say over Refund Requests.
+
+**Viewer**:
+Whoever is behind a request: a signed-in person and the country they are visiting from, or nobody. What a Viewer may see and do is decided from these facts alone, never from the request itself.
+_Avoid_: Current user, Session user
 _Avoid_: Admin (on its own)
 
 ### Enrollment

@@ -4,12 +4,9 @@ import * as schema from "~/db/schema";
 import { UserRole } from "~/db/schema";
 import { eq } from "drizzle-orm";
 import { markdown } from "~/lib/text";
-import { setCurrentUserId } from "~/lib/session";
-import {
-  getCourseAccess,
-  requireContentAccess,
-  requireStaff,
-} from "./access.server";
+import { setCurrentUserId, setDevCountry } from "~/lib/session";
+import { getAccess, getCourseAccess } from "~/modules/access/index.server";
+import { readViewer } from "~/modules/access/request.server";
 
 let db: TestDb;
 let base: ReturnType<typeof seedBaseData>;
@@ -60,7 +57,7 @@ function thrownStatus(run: () => unknown): number | undefined {
   return undefined;
 }
 
-function accessFor(userId: number, country: string | null = null) {
+function accessFor(userId: number | null, country: string | null = null) {
   return getCourseAccess(db, { userId, courseId: base.course.id, country });
 }
 
@@ -71,11 +68,7 @@ beforeEach(() => {
 
 describe("deciding course access", () => {
   it("gives a signed-out visitor no access", () => {
-    const access = getCourseAccess(db, {
-      userId: null,
-      courseId: base.course.id,
-      country: null,
-    });
+    const access = accessFor(null);
 
     expect(access.userId).toBeNull();
     expect(access.isStaff).toBe(false);
@@ -87,6 +80,14 @@ describe("deciding course access", () => {
 
     expect(access.userId).toBeNull();
     expect(access.canViewContent).toBe(false);
+  });
+
+  it("refuses a course that does not exist", () => {
+    expect(
+      thrownStatus(() =>
+        getCourseAccess(db, { userId: base.user.id, courseId: 9999, country: null })
+      )
+    ).toBe(404);
   });
 
   it("lets an enrolled Student read the content", () => {
@@ -168,6 +169,29 @@ describe("deciding course access", () => {
       expect(accessFor(base.user.id, null).canViewContent).toBe(true);
     });
 
+    it("lets a Student in if any of their Purchases was full price", () => {
+      enroll(base.user.id);
+      buy(base.user.id, "IN");
+      buy(base.user.id, "US");
+      buy(base.user.id, "BR");
+
+      expect(accessFor(base.user.id, "DE").canViewContent).toBe(true);
+    });
+
+    it("lets a Student in if any discounted Purchase was from where they are", () => {
+      enroll(base.user.id);
+      buy(base.user.id, "IN");
+      buy(base.user.id, "BR");
+
+      expect(accessFor(base.user.id, "BR").canViewContent).toBe(true);
+    });
+
+    it("never PPP-blocks a Student whose Enrollment has no Purchase behind it", () => {
+      enroll(base.user.id);
+
+      expect(accessFor(base.user.id, "US").pppBlocked).toBe(false);
+    });
+
     it("never PPP-blocks the owning Instructor", () => {
       enroll(base.instructor.id);
       buy(base.instructor.id, "IN");
@@ -197,6 +221,14 @@ describe("looking up a course's own records", () => {
       .get();
   }
 
+  function addQuiz(lessonId: number) {
+    return db
+      .insert(schema.quizzes)
+      .values({ lessonId, title: "Quiz", passingScore: 0.7 })
+      .returning()
+      .get();
+  }
+
   it("finds a lesson that belongs to the course", () => {
     const lesson = addLesson(addModule(base.course.id).id);
 
@@ -215,14 +247,6 @@ describe("looking up a course's own records", () => {
     expect(thrownStatus(() => accessFor(base.user.id).lesson(9999))).toBe(404);
   });
 
-  function addQuiz(lessonId: number) {
-    return db
-      .insert(schema.quizzes)
-      .values({ lessonId, title: "Quiz", passingScore: 0.7 })
-      .returning()
-      .get();
-  }
-
   it("finds a quiz on one of the course's lessons", () => {
     const quiz = addQuiz(addLesson(addModule(base.course.id).id).id);
 
@@ -238,64 +262,97 @@ describe("looking up a course's own records", () => {
   });
 });
 
-describe("guarding a route by course access", () => {
-  const signedOut = () => new Request("http://localhost/");
+describe("guarding by course access", () => {
+  it("rejects a signed-out visitor with 401", () => {
+    expect(thrownStatus(() => accessFor(null).requireContent())).toBe(401);
+    expect(thrownStatus(() => accessFor(null).requireStaff())).toBe(401);
+  });
 
-  async function signedInAs(userId: number) {
-    const setCookie = await setCurrentUserId(signedOut(), userId);
-    return new Request("http://localhost/", {
-      headers: { Cookie: setCookie.split(";")[0] },
+  it("rejects a Student without an Enrollment with 403", () => {
+    expect(thrownStatus(() => accessFor(base.user.id).requireContent())).toBe(
+      403
+    );
+  });
+
+  it("lets an enrolled Student through", () => {
+    enroll(base.user.id);
+
+    expect(accessFor(base.user.id).requireContent().userId).toBe(base.user.id);
+  });
+
+  it("rejects a Student from staff-only actions with 403", () => {
+    enroll(base.user.id);
+
+    expect(thrownStatus(() => accessFor(base.user.id).requireStaff())).toBe(403);
+  });
+
+  it("lets the owning Instructor through staff-only actions", () => {
+    expect(accessFor(base.instructor.id).requireStaff().isOwningInstructor).toBe(
+      true
+    );
+  });
+});
+
+describe("guarding by role", () => {
+  it("rejects a signed-out visitor with 401", () => {
+    const access = getAccess(db, { userId: null });
+
+    expect(thrownStatus(() => access.requireSignedIn())).toBe(401);
+    expect(thrownStatus(() => access.requireInstructorOrAdmin())).toBe(401);
+    expect(thrownStatus(() => access.requireAdmin())).toBe(401);
+  });
+
+  it("hands back the signed-in user", () => {
+    const signedIn = getAccess(db, { userId: base.user.id }).requireSignedIn();
+
+    expect(signedIn.userId).toBe(base.user.id);
+    expect(signedIn.user.id).toBe(base.user.id);
+  });
+
+  it("keeps a Student out of Instructor pages with 403", () => {
+    const access = getAccess(db, { userId: base.user.id });
+
+    expect(thrownStatus(() => access.requireInstructorOrAdmin())).toBe(403);
+  });
+
+  it("lets an Instructor into Instructor pages but not admin ones", () => {
+    const access = getAccess(db, { userId: base.instructor.id });
+
+    expect(access.requireInstructorOrAdmin().isAdmin).toBe(false);
+    expect(thrownStatus(() => access.requireAdmin())).toBe(403);
+  });
+
+  it("lets a Platform Admin in everywhere", () => {
+    const admin = addUser("admin", UserRole.Admin);
+    const access = getAccess(db, { userId: admin.id });
+
+    expect(access.requireInstructorOrAdmin().isAdmin).toBe(true);
+    expect(access.requireAdmin().userId).toBe(admin.id);
+  });
+});
+
+describe("reading the Viewer off a request", () => {
+  const blank = () => new Request("http://localhost/");
+
+  it("reads nobody from a request with no session", async () => {
+    expect(await readViewer(blank())).toEqual({ userId: null, country: null });
+  });
+
+  it("reads the signed-in user and the Cloudflare country", async () => {
+    const cookie = (await setCurrentUserId(blank(), 7)).split(";")[0];
+    const request = new Request("http://localhost/", {
+      headers: { Cookie: cookie, "CF-IPCountry": "in" },
     });
-  }
 
-  async function rejectionStatus(guard: Promise<unknown>) {
-    try {
-      await guard;
-    } catch (error) {
-      return (error as { init?: { status?: number } }).init?.status;
-    }
-    return undefined;
-  }
-
-  it("rejects a signed-out visitor with 401", async () => {
-    expect(
-      await rejectionStatus(
-        requireContentAccess(db, signedOut(), base.course.id)
-      )
-    ).toBe(401);
+    expect(await readViewer(request)).toEqual({ userId: 7, country: "IN" });
   });
 
-  it("rejects a Student without an Enrollment with 403", async () => {
-    const request = await signedInAs(base.user.id);
+  it("prefers the DevUI country over the header", async () => {
+    const cookie = (await setDevCountry(blank(), "BR")).split(";")[0];
+    const request = new Request("http://localhost/", {
+      headers: { Cookie: cookie, "CF-IPCountry": "US" },
+    });
 
-    expect(
-      await rejectionStatus(requireContentAccess(db, request, base.course.id))
-    ).toBe(403);
-  });
-
-  it("lets an enrolled Student through", async () => {
-    enroll(base.user.id);
-    const request = await signedInAs(base.user.id);
-
-    const access = await requireContentAccess(db, request, base.course.id);
-
-    expect(access.userId).toBe(base.user.id);
-  });
-
-  it("rejects a Student from staff-only actions with 403", async () => {
-    enroll(base.user.id);
-    const request = await signedInAs(base.user.id);
-
-    expect(
-      await rejectionStatus(requireStaff(db, request, base.course.id))
-    ).toBe(403);
-  });
-
-  it("lets the owning Instructor through staff-only actions", async () => {
-    const request = await signedInAs(base.instructor.id);
-
-    const access = await requireStaff(db, request, base.course.id);
-
-    expect(access.isOwningInstructor).toBe(true);
+    expect((await readViewer(request)).country).toBe("BR");
   });
 });
