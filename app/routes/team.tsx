@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { Link, useFetcher } from "react-router";
 import { toast } from "sonner";
 import type { Route } from "./+types/team";
-import { getCurrentUserId } from "~/lib/session";
+import { getAccess } from "~/modules/access/index.server";
+import { readViewer } from "~/modules/access/request.server";
 import { Card, CardContent, CardHeader } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { Textarea } from "~/components/ui/textarea";
@@ -81,11 +82,10 @@ export function meta() {
 }
 
 export async function loader({ request }: Route.LoaderArgs) {
-  const currentUserId = await getCurrentUserId(request);
-
-  if (!currentUserId) {
-    throw data("Select a user from the DevUI panel.", { status: 401 });
-  }
+  const { userId: currentUserId } = getAccess(
+    db,
+    await readViewer(request)
+  ).requireSignedIn();
 
   const team = getTeamForAdmin(currentUserId);
 

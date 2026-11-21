@@ -23,6 +23,8 @@ export type Access = {
   isAdmin: boolean;
   isInstructor: boolean;
   requireSignedIn(): SignedIn;
+  /** Instructors only — a Platform Admin is refused (e.g. creating a course they'd then own). */
+  requireInstructor(): SignedIn;
   requireInstructorOrAdmin(): SignedIn;
   requireAdmin(): SignedIn;
 };
@@ -48,6 +50,11 @@ export function getAccess(db: Db, viewer: Pick<Viewer, "userId">): Access {
     isAdmin,
     isInstructor,
     requireSignedIn,
+    requireInstructor() {
+      const signedIn = requireSignedIn();
+      if (!isInstructor) forbidden("Only instructors can access this page.");
+      return signedIn;
+    },
     requireInstructorOrAdmin() {
       const signedIn = requireSignedIn();
       if (!isAdmin && !isInstructor) {

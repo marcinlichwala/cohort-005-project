@@ -10,7 +10,8 @@ import {
   LessonProgressStatus,
 } from "~/db/schema";
 import { eq, and, or, sql } from "drizzle-orm";
-import { getCurrentUserId } from "~/lib/session";
+import { getAccess } from "~/modules/access/index.server";
+import { readViewer } from "~/modules/access/request.server";
 import { Card, CardContent, CardFooter, CardHeader } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { Skeleton } from "~/components/ui/skeleton";
@@ -189,13 +190,10 @@ export function meta() {
 }
 
 export async function loader({ request }: Route.LoaderArgs) {
-  const currentUserId = await getCurrentUserId(request);
-
-  if (!currentUserId) {
-    throw data("Select a user from the DevUI panel to view your dashboard.", {
-      status: 401,
-    });
-  }
+  const { userId: currentUserId } = getAccess(
+    db,
+    await readViewer(request)
+  ).requireSignedIn();
 
   const enrolledCourses = getUserEnrolledCourses(currentUserId);
 

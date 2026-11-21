@@ -322,7 +322,18 @@ describe("guarding by role", () => {
     expect(thrownStatus(() => access.requireAdmin())).toBe(403);
   });
 
-  it("lets a Platform Admin in everywhere", () => {
+  it("keeps a Platform Admin out of Instructor-only pages", () => {
+    const admin = addUser("admin", UserRole.Admin);
+
+    expect(
+      thrownStatus(() => getAccess(db, { userId: admin.id }).requireInstructor())
+    ).toBe(403);
+    expect(
+      getAccess(db, { userId: base.instructor.id }).requireInstructor().userId
+    ).toBe(base.instructor.id);
+  });
+
+  it("lets a Platform Admin in everywhere else", () => {
     const admin = addUser("admin", UserRole.Admin);
     const access = getAccess(db, { userId: admin.id });
 

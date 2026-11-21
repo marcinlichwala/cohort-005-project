@@ -1,7 +1,9 @@
 import { Link, isRouteErrorResponse, useSearchParams } from "react-router";
 import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts";
 import type { Route } from "./+types/instructor.analytics";
-import { requireInstructorOrAdmin } from "~/lib/access.server";
+import { getAccess } from "~/modules/access/index.server";
+import { readViewer } from "~/modules/access/request.server";
+import { db } from "~/db";
 import {
   getInstructorAnalytics,
   type CourseCountryRevenue,
@@ -75,9 +77,13 @@ function parseId(value: string | null): number | null {
 }
 
 export async function loader({ request, url }: Route.LoaderArgs) {
-  const viewer = await requireInstructorOrAdmin(request);
+  const viewer = getAccess(
+    db,
+    await readViewer(request)
+  ).requireInstructorOrAdmin();
   const params = url.searchParams;
-  const tab: AnalyticsTab = params.get("tab") === "course" ? "course" : "overview";
+  const tab: AnalyticsTab =
+    params.get("tab") === "course" ? "course" : "overview";
 
   return {
     tab,

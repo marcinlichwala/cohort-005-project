@@ -4,6 +4,8 @@ import { toast } from "sonner";
 import { z } from "zod";
 import type { Route } from "./+types/courses.$slug";
 import { getCurrentUserId } from "~/lib/session";
+import { getAccess } from "~/modules/access/index.server";
+import { readViewer } from "~/modules/access/request.server";
 import { db } from "~/db";
 import {
   courses,
@@ -451,11 +453,10 @@ export async function loader({ params, request }: Route.LoaderArgs) {
 // Enrollment is handled via the purchase confirmation page — this action only
 // records star ratings.
 export async function action({ params, request }: Route.ActionArgs) {
-  const currentUserId = await getCurrentUserId(request);
-
-  if (!currentUserId) {
-    throw data("You must be logged in to rate a course.", { status: 401 });
-  }
+  const { userId: currentUserId } = getAccess(
+    db,
+    await readViewer(request)
+  ).requireSignedIn();
 
   const course = getCourseBySlug(params.slug);
   if (!course) {
