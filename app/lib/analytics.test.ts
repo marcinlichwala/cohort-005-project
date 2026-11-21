@@ -116,6 +116,12 @@ describe("analytics config", () => {
       expect(rangeStart("30d")).toBe("2026-05-16T12:00:00.000Z");
       expect(rangeStart("90d")).toBe("2026-03-17T12:00:00.000Z");
     });
+
+    it("counts back from the instant it is given rather than the clock", () => {
+      expect(rangeStart("7d", new Date("2026-01-10T00:00:00.000Z"))).toBe(
+        "2026-01-03T00:00:00.000Z"
+      );
+    });
   });
 
   describe("formatMoney", () => {
