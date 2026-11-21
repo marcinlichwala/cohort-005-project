@@ -2,8 +2,8 @@ import { useState, useEffect, useCallback } from "react";
 import { Link, useFetcher, useNavigate } from "react-router";
 import { toast } from "sonner";
 import type { Route } from "./+types/courses.$slug.lessons.$lessonId";
-import { getCurrentUserId } from "~/lib/session";
-import { getAccess, requireContentAccess } from "~/lib/access.server";
+import { getCourseAccess } from "~/modules/access/index.server";
+import { readViewer } from "~/modules/access/request.server";
 import { renderComment } from "~/lib/comment-markdown.server";
 import { markdown, type Markdown } from "~/lib/text";
 import {
@@ -185,24 +185,8 @@ function getCourseWithDetails(id: number) {
   };
 }
 
-function getLessonById(id: number) {
-  return db.select().from(lessons).where(eq(lessons.id, id)).get();
-}
-
 function getModuleById(id: number) {
   return db.select().from(modules).where(eq(modules.id, id)).get();
-}
-
-/**
- * Throws 404 unless the lesson is in the course, so content access to one
- * course can't reach a lesson in another by posting its id to this route.
- */
-function requireLessonInCourse(lessonId: number, courseId: number) {
-  const lesson = getLessonById(lessonId);
-  const mod = lesson ? getModuleById(lesson.moduleId) : undefined;
-  if (!mod || mod.courseId !== courseId) {
-    throw data("Lesson not found in this course", { status: 404 });
-  }
 }
 
 function getUserById(id: number) {
@@ -654,22 +638,13 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     throw data("Course not found", { status: 404 });
   }
 
-  const lesson = getLessonById(lessonId);
-  if (!lesson) {
-    throw data("Lesson not found", { status: 404 });
-  }
+  const access = getCourseAccess(db, {
+    ...(await readViewer(request)),
+    courseId: course.id,
+  });
+  const lesson = access.lesson(lessonId);
+  const mod = getModuleById(lesson.moduleId)!;
 
-  const mod = getModuleById(lesson.moduleId);
-  if (!mod) {
-    throw data("Module not found", { status: 404 });
-  }
-
-  // Verify lesson belongs to this course
-  if (mod.courseId !== course.id) {
-    throw data("Lesson not found in this course", { status: 404 });
-  }
-
-  const access = await getAccess(request, course.id);
   const currentUserId = access.userId;
   const enrolled = access.enrolled;
   let lessonStatus: string | null = null;
@@ -708,7 +683,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     }
   }
 
-  // PPP Access Guard — resolved by getAccess, which treats a blocked user as
+  // PPP Access Guard — resolved by getCourseAccess, which treats a blocked user as
   // having no access to the course's content at all.
   const { pppBlocked, pppBlockedCountry, pppPurchaseCountry, canViewContent } =
     access;
@@ -838,23 +813,24 @@ export async function action({ params, request }: Route.ActionArgs) {
     throw data("Course not found", { status: 404 });
   }
 
-  const currentUserId = await getCurrentUserId(request);
-  if (!currentUserId) {
-    throw data("You must be logged in", { status: 401 });
-  }
+  // Every intent re-checks access here rather than relying on the loader —
+  // loader guards don't protect actions — and reaches the lesson only through
+  // the course, so a lesson elsewhere can't be posted to this route.
+  const access = getCourseAccess(db, {
+    ...(await readViewer(request)),
+    courseId: course.id,
+  }).requireContent();
+  access.lesson(lessonId);
+  const currentUserId = access.userId;
 
   const formData = await request.formData();
   const intent = formData.get("intent");
 
-  // Comment intents re-check access here rather than relying on the loader —
-  // loader guards don't protect actions.
   if (
     intent === "create-comment" ||
     intent === "edit-comment" ||
     intent === "delete-comment"
   ) {
-    const access = await requireContentAccess(request, course.id);
-
     try {
       if (intent === "create-comment") {
         const parsed = parseFormData(formData, createCommentSchema);
@@ -924,12 +900,7 @@ export async function action({ params, request }: Route.ActionArgs) {
     }
   }
 
-  // Bookmark and Note intents re-check access here, like the comment intents
-  // above — loader guards don't protect actions.
   if (intent === "toggle-bookmark" || intent === "save-note") {
-    await requireContentAccess(request, course.id);
-    requireLessonInCourse(lessonId, course.id);
-
     if (intent === "toggle-bookmark") {
       const bookmarked = toggleBookmark(db, currentUserId, lessonId, new Date());
       return { ok: true, bookmarked };
@@ -960,6 +931,7 @@ export async function action({ params, request }: Route.ActionArgs) {
     if (isNaN(quizId)) {
       throw data("Invalid quiz ID", { status: 400 });
     }
+    access.quiz(quizId);
 
     // Collect answers: form fields named "question-{questionId}" with value = optionId
     const selectedAnswers: Record<number, number> = {};
