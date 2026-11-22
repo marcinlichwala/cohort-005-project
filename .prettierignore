@@ -1,0 +1,10 @@
+# Generated
+drizzle/
+build/
+.react-router/
+package-lock.json
+skills-lock.json
+
+# Vendored agent skills, installed from skills-lock.json
+.agents/
+.claude/
