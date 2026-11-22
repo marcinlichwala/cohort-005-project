@@ -23,7 +23,11 @@
     "db:migrate": "drizzle-kit migrate",
     "loc": "git ls-files | grep -vE '(lock|.db|_snapshot.json)' | xargs wc -l",
     "lint:boundaries": "depcruise app",
-    "check": "npm run typecheck && npm run lint:boundaries && npm run test"
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check:file-tokens": "tsx scripts/check-file-tokens.ts",
+    "check": "npm run format:check && npm run typecheck && npm run lint:boundaries && npm run test",
+    "prepare": "git config core.hooksPath .githooks || true"
   },
   "dependencies": {
     "@hello-pangea/dnd": "^18.0.1",
