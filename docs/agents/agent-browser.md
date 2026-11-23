@@ -12,6 +12,31 @@ npm install -g agent-browser
 agent-browser install
 ```
 
+### On Linux ARM64
+
+If `uname -m` prints `aarch64`, `agent-browser install` fails with
+`Chrome for Testing does not provide Linux ARM64 builds.` Use Playwright's
+ARM64 Chromium instead:
+
+```bash
+npx playwright install chromium   # downloads to ~/.cache/ms-playwright
+sudo apt-get install -y libnspr4 libnss3 libasound2t64
+```
+
+Then point agent-browser at that binary in `~/.bashrc`. The build number in
+the path (`chromium-1255` here) changes when Playwright updates — check
+`ls ~/.cache/ms-playwright`:
+
+```bash
+export AGENT_BROWSER_EXECUTABLE_PATH=$HOME/.cache/ms-playwright/chromium-1255/chrome-linux-arm64/chrome
+```
+
+If you keep the browsers somewhere else, set `PLAYWRIGHT_BROWSERS_PATH` to that
+directory and use it in the path above. If Chrome exits with
+`error while loading shared libraries`, run
+`ldd "$AGENT_BROWSER_EXECUTABLE_PATH" | grep 'not found'` and install what it
+lists.
+
 ## Asking your own question
 
 Start the app with `npm run dev` first. The examples below use
